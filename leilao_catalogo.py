@@ -43,15 +43,26 @@ def processar_pdf(file_bytes):
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                texto = page.extract_text(layout=True) or page.extract_text()
-                if texto:
-                    paginas.append(texto)
+                texto = page.extract_text(layout=True) or page.extract_text() or ""
+                paginas.append(texto)
     except Exception as e:
-        st.error(f"Erro ao processar PDF: {str(e)}")
+        st.error(f"Erro ao processar texto do PDF: {str(e)}")
     return paginas
 
 @st.cache_data(show_spinner=False)
+def obter_total_paginas_pdf(file_bytes):
+    if not file_bytes:
+        return 0
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            return len(pdf.pages)
+    except:
+        return 0
+
+@st.cache_data(show_spinner=False)
 def obter_imagem_bytes_pagina(file_bytes, num_pagina):
+    if not file_bytes or num_pagina < 0:
+        return None
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             if 0 <= num_pagina < len(pdf.pages):
@@ -59,16 +70,34 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina):
                 buffer = BytesIO()
                 img.save(buffer, format="JPEG")
                 return buffer.getvalue()
-    except:
+    except Exception as e:
+        st.warning(f"Não foi possível renderizar imagem da página {num_pagina + 1}: {str(e)}")
         return None
     return None
 
 @st.cache_data
 def encontrar_pagina_catalogo(texto_cat_tuple, num_lote):
     texto_cat = list(texto_cat_tuple)
-    for idx, pagina in enumerate(texto_cat):
-        if re.search(rf"\b(lote|lt)?\s*0*{int(num_lote)}\b", pagina, re.IGNORECASE):
-            return idx, pagina
+    if not texto_cat or not num_lote:
+        return -1, ""
+
+    try:
+        num_clean = int(re.sub(r"\D", "", str(num_lote)))
+    except ValueError:
+        return -1, ""
+
+    # Padrões de busca por relevância
+    padroes = [
+        rf"\b(?:LOTE|LT|L|Nº|NUMERO)[\s:\.\-]*0*{num_clean}\b",
+        rf"\bLOTE\s*0*{num_clean}\b",
+        rf"\b0*{num_clean}\b"
+    ]
+
+    for pattern in padroes:
+        for idx, pagina in enumerate(texto_cat):
+            if pagina and re.search(pattern, pagina, re.IGNORECASE):
+                return idx, pagina
+
     return -1, ""
 
 @st.cache_data(ttl=7200, show_spinner=False)
@@ -368,7 +397,6 @@ def run():
         .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
         .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
-        .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; margin-top: 15px; }
     </style>
     """
@@ -385,7 +413,10 @@ def run():
         mostrar_preview = st.checkbox("MOSTRAR PREVIEW VISUAL DO CATÁLOGO", value=True)
 
     file_bytes_oe = file_oe.getvalue() if file_oe else None
-    texto_cat = processar_pdf(file_cat.getvalue()) if file_cat else []
+    file_bytes_cat = file_cat.getvalue() if file_cat else None
+    
+    texto_cat = processar_pdf(file_bytes_cat)
+    total_paginas_cat = obter_total_paginas_pdf(file_bytes_cat)
 
     sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes_oe)
 
@@ -426,8 +457,8 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx_cat]
     dados_lote_oe = mapa_oe.get(num_lote, {})
 
-    pagina_catalogo, texto_pagina_catalogo = encontrar_pagina_catalogo(tuple(texto_cat), num_lote) if texto_cat else (-1, "")
-    img_pagina_bytes = obter_imagem_bytes_pagina(file_cat.getvalue(), pagina_catalogo) if (file_cat and pagina_catalogo >= 0) else None
+    # Localização de página no catálogo
+    pagina_detectada, texto_pagina_catalogo = encontrar_pagina_catalogo(tuple(texto_cat), num_lote) if texto_cat else (-1, "")
 
     col_esquerda, col_direita = st.columns([1, 1])
 
@@ -509,18 +540,42 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-        # 3. CATÁLOGO (PREVIEW VISUAL E TEXTO DO CATÁLOGO ABAIXO DA O.E.)
-        if mostrar_preview and img_pagina_bytes:
-            st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pagina_catalogo + 1}</div>', unsafe_allow_html=True)
-            st.image(img_pagina_bytes, use_container_width=True)
+        # 3. CATÁLOGO (PREVIEW VISUAL E CONTROLE DE PÁGINA)
+        if file_bytes_cat:
+            st.markdown("---")
+            col_cat_title, col_cat_num = st.columns([2, 1])
+            
+            pag_default = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
+            with col_cat_num:
+                pag_selecionada = st.number_input(
+                    "Página do Catálogo:",
+                    min_value=1,
+                    max_value=total_paginas_cat,
+                    value=pag_default,
+                    key=f"pag_num_{num_lote}"
+                ) - 1
 
-        if texto_pagina_catalogo:
-            st.markdown(f'''
-            <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
-                <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO DO CATÁLOGO</h3>
-                <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{texto_pagina_catalogo[:1500]}</div>
-            </div>
-            ''', unsafe_allow_html=True)
+            with col_cat_title:
+                st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
+
+            if pagina_detectada < 0:
+                st.info(f"💡 Página do Lote {num_lote} não localizada automaticamente no texto. Ajuste o número da página no campo acima se necessário.")
+
+            if mostrar_preview:
+                img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada)
+                if img_bytes:
+                    st.image(img_bytes, use_container_width=True)
+
+            txt_pag_exibir = texto_cat[pag_selecionada] if pag_selecionada < len(texto_cat) else ""
+            if txt_pag_exibir:
+                st.markdown(f'''
+                <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
+                    <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO EXTRAÍDO DA PÁGINA {pag_selecionada + 1}</h3>
+                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{txt_pag_exibir[:1500]}</div>
+                </div>
+                ''', unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Envie o arquivo PDF do Catálogo no menu lateral para visualizar as páginas.")
 
     # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
     precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, api_keys)
