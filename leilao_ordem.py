@@ -5,6 +5,7 @@ import os
 import requests
 import json
 import time
+import concurrent.futures
 from io import BytesIO
 
 def obter_api_keys():
@@ -63,7 +64,6 @@ def extrair_dados_oe_pdf(file_bytes):
 
                             row_str_upper = " ".join(clean_row).upper()
 
-                            # Identifica e armazena o cabeçalho exato da tabela
                             if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
                                 headers_atuais = [c if c else f"COLUNA_{i+1}" for i, c in enumerate(clean_row)]
                                 col_map = {}
@@ -110,7 +110,6 @@ def extrair_dados_oe_pdf(file_bytes):
                                 clean_oe = re.sub(r"\D", "", raw_oe)
                                 posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else (raw_oe if raw_oe else f"{len(sequencia)+1}º A ENTRAR")
 
-                                # MONTA A LINHA CONTEXTUALIZADA (CABEÇALHO + DADO)
                                 pares_rotulados = []
                                 for idx, val in enumerate(clean_row):
                                     if val:
@@ -298,6 +297,19 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
     detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
     return None, f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}"
 
+def precarregar_proximos_lotes(idx_atual, lista_lotes, mapa_oe, api_keys):
+    proximos_indices = [idx_atual + i for i in range(1, 4) if (idx_atual + i) < len(lista_lotes)]
+    if not proximos_indices or not api_keys:
+        return
+        
+    def _carregar(i):
+        num_lt = lista_lotes[i]
+        dados_lt = mapa_oe.get(num_lt, {})
+        analisar_lote_leiloeiro_deepseek(num_lt, dados_lt, api_keys)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor.map(_carregar, proximos_indices)
+
 def run():
     css_code = """
     <style>
@@ -430,7 +442,6 @@ def run():
         elif erro_ia:
             st.error(erro_ia)
 
-        # 📋 CAMPO DEDICADO O.E. (EXIBIÇÃO DIRETA CABEÇALHO + VALOR DO PDF)
         linha_ctx = dados_lote.get('linha_contextualizada', '')
         if linha_ctx:
             itens = linha_ctx.split(' | ')
@@ -444,3 +455,6 @@ def run():
             <div>{oe_formatted}</div>
         </div>
         ''', unsafe_allow_html=True)
+
+    # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
+    precarregar_proximos_lotes(st.session_state.lote_idx_oe, lista_lotes, mapa_oe, api_keys)
