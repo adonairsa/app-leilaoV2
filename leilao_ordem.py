@@ -120,31 +120,31 @@ def analisar_lote_oe_com_gemini(num_lote, dados_lote, api_key):
     LINHA DE DADOS:
     {dados_lote.get('linha_completa', '')}
 
-    - Lote: {num_lote}
-    - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    - Produto/Animal: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
     - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
+    - Status: {dados_lote.get('info_reproducao', 'N/A')}
     - Categoria / Peso / Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
 
     REGRAS CRÍTICAS DE CONTEÚDO E FORMATO:
-    - NÃO use saudações (É PROIBIDO escrever 'Boa noite', 'Boa tarde', 'Olá', etc.).
-    - NÃO escreva introduções ou frases de cortesia.
-    - Comece a resposta DIRETAMENTE em "📌 **APRESENTAÇÃO DO LOTE**".
-    - Seja ULTRA-DIRETO, OBJETIVO e CONCISO (no máximo 1 frase curta por item).
+    1. É PROIBIDO usar saudações (Boa noite, Olá, etc).
+    2. É PROIBIDO dizer "Não há informações", "Não foram fornecidas informações" ou "Desconhecido". Se o lote tiver poucas informações, NUNCA foque no que falta.
+    3. Se faltarem dados do Pai, Mãe ou Prenhez, SIMPLESMENTE OMITE ESSES TÓPICOS.
+    4. Quando houver pouca informação, crie uma "APRESENTAÇÃO DO LOTE" exaltando fortemente a raça, idade, peso e a categoria do animal. Transforme o pouco que tem em um argumento de venda valorizado.
+    5. Seja ULTRA-DIRETO (máximo 1 a 2 frases curtas por item).
 
-    Siga ESTRITAMENTE este modelo:
+    MOLDE DE RESPOSTA (Use apenas os tópicos que tiverem dados reais para exaltar):
 
     📌 **APRESENTAÇÃO DO LOTE**
-    [Resumo direto do animal, categoria, peso e oferta em 1 frase].
+    [Venda agressiva exaltando os pontos fortes do animal, idade, categoria e a oportunidade].
 
-    bull **GENÉTICA DO PAI**
-    [Nome do pai e raçadores de destaque na linha paterna em 1 frase].
+    🐂 **GENÉTICA DO PAI**
+    [APENAS SE HOUVER DADOS: Linhagem paterna em 1 frase].
 
-    cow **GENÉTICA DA MÃE**
-    [Nome da mãe e matrizes/linhagem materna em 1 frase].
+    🐄 **GENÉTICA DA MÃE**
+    [APENAS SE HOUVER DADOS: Linhagem materna em 1 frase].
 
-    syringe **GENÉTICA DA REPRODUÇÃO / PRENHEZ**
-    [Status do acasalamento, touro acasalado e previsão em 1 frase].
+    💉 **REPRODUÇÃO / PRENHEZ**
+    [APENAS SE HOUVER DADOS: Status reprodutivo em 1 frase].
     """
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
@@ -186,7 +186,7 @@ def gerar_gatilhos_ia_especificos(num_lote, dados_lote, api_key):
 
     Gere EXATAMENTE 3 a 4 GATILHOS DE CANTA ULTRA-ESPECÍFICOS e DESENHADOS para este animal.
     Regras:
-    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso ou a mãe se existirem).
+    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso ou a mãe se existirem). Se não existirem, exalte a categoria (ex: "Bezerra de cabeceira!").
     - Frases curtas, chamativas e de alto impacto para gritar no microfone (máximo 8 a 10 palavras por gatilho).
     - NÃO use saudações, números, introduções ou marcadores genéricos.
     - Separe cada gatilho em uma nova linha.
@@ -308,7 +308,6 @@ def run():
 
     col_esquerda, col_direita = st.columns([1, 1])
 
-    # COLUNA ESQUERDA: DADOS DE PISTA E GATILHOS GERAIS
     with col_esquerda:
         lote_texto = f"LOTE {num_lote}"
         posicao_texto = dados_lote.get("posicao", f"{st.session_state.lote_idx_oe + 1}º")
@@ -343,7 +342,6 @@ def run():
         for g in gatilhos:
             st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
 
-    # COLUNA DIREITA: ANÁLISE DA IA + GATILHOS ESPECÍFICOS DESENHADOS PELA IA
     with col_direita:
         with st.spinner("🤖 Gemini analisando a linhagem na Ordem de Entrada..."):
             analise_ia = analisar_lote_oe_com_gemini(num_lote, dados_lote, api_key)
@@ -354,7 +352,6 @@ def run():
             </div>
             ''', unsafe_allow_html=True)
 
-        # 🎯 SEÇÃO DE GATILHOS ESPECÍFICOS DESENHADOS PELA IA LOGO ABAIXO
         with st.spinner("⚡ IA desenhando gatilhos de canta para o lote..."):
             gatilhos_ia = gerar_gatilhos_ia_especificos(num_lote, dados_lote, api_key)
             if gatilhos_ia:
