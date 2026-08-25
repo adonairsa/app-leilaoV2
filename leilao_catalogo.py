@@ -66,74 +66,105 @@ def extrair_dados_oe(texto_oe_tuple):
     texto_oe = list(texto_oe_tuple)
     sequencia = []
     dados_por_lote = {}
+    condicoes_leilao = []
     
     if not texto_oe:
-        return sequencia, dados_por_lote
+        return sequencia, dados_por_lote, ""
     
     for pagina in texto_oe:
-        for linha in pagina.split('\n'):
+        linhas = pagina.split('\n')
+        col_map = {}
+        
+        for linha in linhas:
             linha_limpa = linha.strip()
-            if not linha_limpa or re.search(r"QTD\s+IDADE\s+PESO", linha_limpa, re.IGNORECASE) or re.search(r"O\.E\.\s*LT", linha_limpa, re.IGNORECASE):
+            if not linha_limpa:
                 continue
-            
-            m_posicao = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
-            if m_posicao:
-                posicao = int(m_posicao.group(1))
-                numero_lote = int(m_posicao.group(2))
                 
-                if 1 <= numero_lote <= 500:
-                    lt_num = f"{numero_lote:02d}"
-                    if lt_num not in sequencia:
-                        sequencia.append(lt_num)
+            if re.search(r"(condição|parcela|desconto|comissão|frete|pagamento|lance vezes)", linha_limpa, re.IGNORECASE):
+                if linha_limpa not in condicoes_leilao:
+                    condicoes_leilao.append(linha_limpa)
+            
+            if any(h in linha_limpa.upper() for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
+                parts_header = [p.strip().upper() for p in (linha_limpa.split('|') if '|' in linha_limpa else re.split(r'\s{2,}', linha_limpa))]
+                for idx, part in enumerate(parts_header):
+                    if re.search(r"\b(LT|LOTE)\b", part): col_map['lote'] = idx
+                    elif re.search(r"\b(O\.?E\.?|POSIÇÃO|ORDEM)\b", part): col_map['posicao'] = idx
+                    elif 'QTD' in part: col_map['qtd'] = idx
+                    elif 'IDADE' in part: col_map['idade'] = idx
+                    elif 'PESO' in part: col_map['peso'] = idx
+                    elif 'CATEGORIA' in part: col_map['categoria'] = idx
+                    elif 'PELAGEM' in part: col_map['pelagem'] = idx
+                    elif 'PRODUTO' in part or 'ANIMAL' in part: col_map['produto'] = idx
+                    elif 'VENDEDOR' in part: col_map['vendedor'] = idx
+                continue
+
+            parts = [p.strip() for p in (linha_limpa.split('|') if '|' in linha_limpa else re.split(r'\s{2,}', linha_limpa))]
+            
+            if len(parts) >= 3:
+                lt_val = ""
+                if 'lote' in col_map and col_map['lote'] < len(parts):
+                    raw_lt = re.sub(r"\D", "", parts[col_map['lote']])
+                    if raw_lt and 1 <= int(raw_lt) <= 999:
+                        lt_val = f"{int(raw_lt):02d}"
+                
+                if not lt_val:
+                    for p_idx in [0, 1]:
+                        if p_idx < len(parts):
+                            raw_lt = re.sub(r"\D", "", parts[p_idx])
+                            if raw_lt and 1 <= int(raw_lt) <= 999:
+                                lt_val = f"{int(raw_lt):02d}"
+                                break
+
+                if lt_val:
+                    if lt_val not in sequencia:
+                        sequencia.append(lt_val)
                     
-                    restante = linha_limpa[m_posicao.end():].strip()
-                    parts = restante.split()
-                    
-                    dados = {
-                        "lote": lt_num, "posicao": f"{posicao}º A ENTRAR",
-                        "qtd": "", "idade": "", "peso": "", "categoria": "",
-                        "produto": "", "vendedor": "", "raca": "", "info_reproducao": "",
-                        "tipo_reproducao": "", "nome_animal": "", "porcentagem_venda": "",
+                    pos_val = parts[col_map['posicao']] if 'posicao' in col_map and col_map['posicao'] < len(parts) else parts[0]
+                    qtd_val = parts[col_map['qtd']] if 'qtd' in col_map and col_map['qtd'] < len(parts) else ""
+                    idade_val = parts[col_map['idade']] if 'idade' in col_map and col_map['idade'] < len(parts) else ""
+                    peso_val = parts[col_map['peso']] if 'peso' in col_map and col_map['peso'] < len(parts) else ""
+                    cat_val = parts[col_map['categoria']] if 'categoria' in col_map and col_map['categoria'] < len(parts) else ""
+                    pelagem_val = parts[col_map['pelagem']] if 'pelagem' in col_map and col_map['pelagem'] < len(parts) else ""
+                    prod_val = parts[col_map['produto']] if 'produto' in col_map and col_map['produto'] < len(parts) else ""
+                    vend_val = parts[col_map['vendedor']] if 'vendedor' in col_map and col_map['vendedor'] < len(parts) else parts[-1]
+
+                    if not prod_val and len(parts) > 3:
+                        prod_val = parts[3]
+
+                    nome_anim = prod_val
+                    porcentagem = ""
+                    m_perc = re.search(r"(\d+%)\s*de:\s*(.+)", prod_val, re.IGNORECASE)
+                    if m_perc:
+                        porcentagem = m_perc.group(1)
+                        nome_anim = m_perc.group(2).strip()
+
+                    info_repro, tipo_repro = "", ""
+                    m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", f"{cat_val} {prod_val}", re.IGNORECASE)
+                    if m_repro:
+                        info_repro = m_repro.group(0).strip()
+                        txt_l = info_repro.lower()
+                        if "parida" in txt_l: tipo_repro = "parida"
+                        elif "prenh" in txt_l: tipo_repro = "prenhez"
+                        elif "inseminada" in txt_l: tipo_repro = "inseminacao"
+
+                    dados_por_lote[lt_val] = {
+                        "lote": lt_val,
+                        "posicao": pos_val,
+                        "qtd": qtd_val,
+                        "idade": idade_val,
+                        "peso": peso_val,
+                        "categoria": cat_val,
+                        "pelagem": pelagem_val,
+                        "produto": prod_val,
+                        "nome_animal": nome_anim,
+                        "porcentagem_venda": porcentagem,
+                        "vendedor": vend_val,
+                        "info_reproducao": info_repro,
+                        "tipo_reproducao": tipo_repro,
                         "linha_completa": linha_limpa
                     }
-                    
-                    m_porcentagem = re.search(r"(\d+%)\s*de:\s*(.+?)(?=\s+(?:parida|prenhe|prenha|inseminada|nelore|angus|girolando)|\s*$)", linha_limpa, re.IGNORECASE)
-                    if m_porcentagem:
-                        dados["porcentagem_venda"] = m_porcentagem.group(1)
-                        dados["nome_animal"] = m_porcentagem.group(2).strip()
-                    
-                    m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", linha_limpa, re.IGNORECASE)
-                    if m_repro:
-                        texto_repro = m_repro.group(0).strip()
-                        dados["info_reproducao"] = texto_repro
-                        txt_low = texto_repro.lower()
-                        if "parida" in txt_low:
-                            dados["tipo_reproducao"] = "parida"
-                        elif "prenh" in txt_low:
-                            dados["tipo_reproducao"] = "prenhez"
-                        elif "inseminada" in txt_low:
-                            dados["tipo_reproducao"] = "inseminacao"
-                    
-                    if len(parts) >= 1: dados["qtd"] = parts[0]
-                    if len(parts) >= 2: dados["idade"] = parts[1]
-                    if len(parts) >= 3: dados["peso"] = parts[2]
-                    if len(parts) >= 4: dados["categoria"] = parts[3]
-                    
-                    if len(parts) >= 5:
-                        produto_parts, vendedor_encontrado = [], False
-                        for part in parts[4:]:
-                            if part.lower() in ["nelore", "angus", "girolando", "holandês"]:
-                                dados["raca"] = part
-                                vendedor_encontrado = True
-                                continue
-                            if vendedor_encontrado:
-                                dados["vendedor"] += " " + part if dados["vendedor"] else part
-                            else:
-                                produto_parts.append(part)
-                        dados["produto"] = " ".join(produto_parts)
-                    
-                    dados_por_lote[lt_num] = dados
-    return sequencia, dados_por_lote
+
+    return sequencia, dados_por_lote, " | ".join(condicoes_leilao[:4])
 
 def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
     if not texto_pagina_cat or not dados_lote:
@@ -164,36 +195,36 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
 
     headers = {"Content-Type": "application/json"}
     prompt_text = f"""
-    Você é um zootecnista e leiloeiro de elite no agronegócio.
-    Analise os dados, o texto e a IMAGEM da folha do LOTE {num_lote}:
+    Você é um zootecnista e leiloeiro de elite no agronegócio (Nelore/Zebu, Equinos Quarto de Milha, etc.).
+    Analise a IMAGEM da página do catálogo e os DADOS extraídos do LOTE {num_lote}:
 
     DADOS DA ORDEM:
     - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
     - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Status: {dados_lote.get('info_reproducao', 'N/A')}
-    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} | {dados_lote.get('peso', 'N/A')} | {dados_lote.get('idade', 'N/A')}
+    - Categoria: {dados_lote.get('categoria', 'N/A')}
+    - Pelagem: {dados_lote.get('pelagem', 'N/A')}
+    - Peso/Idade: {dados_lote.get('peso', 'N/A')} | {dados_lote.get('idade', 'N/A')}
+    - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
+    - Vendedor: {dados_lote.get('vendedor', 'N/A')}
 
     TEXTO DO CATÁLOGO:
-    {texto_pagina_cat[:1000] if texto_pagina_cat else 'N/A'}
+    {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
 
     REGRAS CRÍTICAS:
-    1. É PROIBIDO usar saudações (Boa noite, Olá, etc).
-    2. É PROIBIDO dizer que faltam informações. Oculte tópicos sem dados e exalte o que tem na tela.
+    1. É PROIBIDO usar saudações (Boa noite, Olá, etc.).
+    2. É PROIBIDO dizer que faltam informações. Adapte a canta para o tipo de animal (se for cavalo, exalte velocidade/trabalho/pelagem; se for bovino, exalte carcaça/matriz/genealogia).
     3. Seja ULTRA-DIRETO. Frases curtas.
 
-    Gere a resposta EXATAMENTE neste formato (não mude as marcações):
+    Gere a resposta EXATAMENTE neste formato:
 
     📌 **APRESENTAÇÃO DO LOTE**
     [Venda agressiva exaltando os pontos fortes em 1 frase]
 
-    🐂 **GENÉTICA DO PAI**
-    [Linhagem paterna, se houver]
-
-    🐄 **GENÉTICA DA MÃE**
-    [Linhagem materna, se houver]
+    🐂 **GENÉTICA / PEDIGREE**
+    [Linhagem paterna e materna identificada na imagem/texto em 1 frase]
 
     💉 **REPRODUÇÃO / PRENHEZ**
-    [Status reprodutivo, se houver]
+    [Status reprodutivo ou touro acasalado, se houver]
 
     ---GATILHOS---
     [Gatilho de canta curto 1 desenhado para o lote]
@@ -207,11 +238,11 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
     payload = {"contents": [{"parts": parts}]}
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
+    modelos = ["gemini-1.5-flash", "gemini-1.5-pro"]
     ultimo_erro = ""
 
     for mod in modelos:
-        for tentativa in range(2): # Se estourar todas as chaves, tenta mais uma rodada
+        for tentativa in range(2): 
             for api_key in api_keys:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
                 try:
@@ -229,12 +260,12 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
                             return resposta_completa.strip(), []
                             
                     elif response.status_code == 429:
-                        ultimo_erro = "Cota limite"
-                        continue # Vai para a próxima chave
+                        ultimo_erro = "Cota limite alcançada."
+                        continue
                         
                     elif response.status_code == 404:
                         ultimo_erro = f"Modelo {mod} indisponível."
-                        break # Modelo não existe nesta chave, tenta o próximo
+                        break
                         
                     else:
                         ultimo_erro = res_json.get('error', {}).get('message', response.text)
@@ -244,11 +275,12 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
                     ultimo_erro = str(e)
                     continue
 
-            # Se todas as chaves falharem por limite de taxa, espera 5 segundos
             if "Cota" in ultimo_erro:
                 time.sleep(5)
+            elif "indisponível" in ultimo_erro:
+                break
             else:
-                break # Erro genérico, pula para próximo modelo
+                break
 
     return f"⚠️ Erro de Conexão ou Limite Atingido. Detalhe: {ultimo_erro}", []
 
@@ -257,14 +289,18 @@ def gerar_gatilhos_padrao(dados_lote):
     if not dados_lote:
         return ["ANIMAL SELECIONADO!", "QUALIDADE GARANTIDA!", "OPORTUNIDADE NA PISTA!"]
     categoria = dados_lote.get("categoria", "").lower()
+    pelagem = dados_lote.get("pelagem", "").upper()
+    
     if dados_lote.get("porcentagem_venda"):
         gatilhos.append(f"OFERTA DE {dados_lote['porcentagem_venda']} DO LOTE!")
+    if pelagem:
+        gatilhos.append(f"PELAGEM: {pelagem} DE DESTAQUE!")
     if dados_lote.get("info_reproducao"):
         gatilhos.append(f"STATUS: {dados_lote['info_reproducao']}")
-    if "novilha" in categoria or "bezerra" in categoria:
+    if "novilha" in categoria or "bezerra" in categoria or "fêmea" in categoria:
         gatilhos.append("FÊMEA DE CABECEIRA E FUTURO DO REBANHO!")
-    if "vaca" in categoria:
-        gatilhos.append("MATRIZ COMPROVADA E PRODUTIVA!")
+    elif "macho" in categoria or "garRão" in categoria:
+        gatilhos.append("MACHO DE MUITA ESTRUTURA E RAÇA!")
     gatilhos.extend(["PROCEDÊNCIA COMPROVADA!", "LIQUIDEZ IMEDIATA NA PISTA!"])
     return gatilhos[:4]
 
@@ -301,7 +337,7 @@ def run():
     texto_oe = processar_pdf(file_oe.getvalue()) if file_oe else []
     texto_cat = processar_pdf(file_cat.getvalue()) if file_cat else []
 
-    sequencia_oe, mapa_oe = extrair_dados_oe(tuple(texto_oe))
+    sequencia_oe, mapa_oe, condicoes_leilao = extrair_dados_oe(tuple(texto_oe))
 
     if sequencia_oe:
         lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
@@ -370,11 +406,11 @@ def run():
         if dados_lote:
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.markdown(f'<div class="animal-info"><strong>CATEGORIA:</strong><br>{dados_lote.get("categoria","-")}<br><br><strong>RAÇA:</strong><br>{dados_lote.get("raca","-")}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="animal-info"><strong>CATEGORIA:</strong><br>{dados_lote.get("categoria","-")}<br><br><strong>PELAGEM/RAÇA:</strong><br>{dados_lote.get("pelagem") or dados_lote.get("raca","-")}</div>', unsafe_allow_html=True)
             with c2:
                 st.markdown(f'<div class="animal-info"><strong>PESO:</strong><br>{dados_lote.get("peso","-")}<br><br><strong>IDADE:</strong><br>{dados_lote.get("idade","-")}</div>', unsafe_allow_html=True)
             with c3:
-                st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd","-")}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor","-")}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd","-") or "1"}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor","-")}</div>', unsafe_allow_html=True)
 
         st.markdown("### 🎙️ GATILHOS DE PISTA")
         gatilhos = gerar_gatilhos_padrao(dados_lote)
