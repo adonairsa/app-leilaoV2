@@ -7,15 +7,23 @@ import base64
 import time
 from io import BytesIO
 
-def obter_api_key():
+def obter_api_keys():
+    chaves = []
     try:
-        if "GEMINI_API_KEY" in st.secrets:
-            return st.secrets["GEMINI_API_KEY"]
-        if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
+        if "GEMINI_API_KEYS" in st.secrets:
+            raw_keys = st.secrets["GEMINI_API_KEYS"]
+            chaves = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        elif "GEMINI_API_KEY" in st.secrets:
+            chaves = [st.secrets["GEMINI_API_KEY"].strip()]
     except:
         pass
-    return os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        
+    if not chaves:
+        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY")
+        if env_keys:
+            chaves = [k.strip() for k in env_keys.split(",") if k.strip()]
+            
+    return chaves
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -149,13 +157,12 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
                 break
     return dados_atualizados
 
-# ==================== ANÁLISE UNIFICADA COM ANTI-BLOQUEIO ====================
+# ==================== ANÁLISE UNIFICADA COM RODÍZIO DE CHAVES ====================
 @st.cache_data(show_spinner=False)
-def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
-    if not api_key:
-        return "⚠️ Insira a GEMINI_API_KEY nos Secrets do Streamlit.", []
+def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_keys):
+    if not api_keys:
+        return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
 
-    api_key_clean = api_key.strip()
     headers = {"Content-Type": "application/json"}
 
     prompt_text = f"""
@@ -207,10 +214,9 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
 
     for mod in modelos:
         for ver in ["v1beta", "v1"]:
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-            
-            # Tenta até 3 vezes por modelo se bater no limite de velocidade (429)
-            for tentativa in range(3):
+            # Rotação das chaves
+            for api_key in api_keys:
+                url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key}"
                 try:
                     response = requests.post(url, headers=headers, json=payload, timeout=25)
                     res_json = response.json()
@@ -227,18 +233,18 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
                             return resposta_completa.strip(), []
                             
                     elif response.status_code == 429:
-                        # Bateu no limite de requisições! Espera 8 segundos e tenta de novo.
-                        time.sleep(8)
-                        continue 
+                        ultimo_erro = "Cota de requisições excedida."
+                        continue  # 🔄 PULA PARA A PRÓXIMA CHAVE IMEDIATAMENTE
+                        
                     else:
                         ultimo_erro = res_json.get('error', {}).get('message', response.text)
-                        break # Sai das tentativas e vai para o próximo modelo
+                        break  # Sai do loop de chaves, tenta o próximo modelo
                         
                 except Exception as e:
                     ultimo_erro = str(e)
-                    break # Sai das tentativas e vai para o próximo modelo
+                    continue  # Erro de rede, tenta a próxima chave
 
-    return f"⚠️ Erro na resposta da API: {ultimo_erro}", []
+    return f"⚠️ Erro na resposta da API: Todas as chaves falharam. Detalhe: {ultimo_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
@@ -270,23 +276,13 @@ def run():
         .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
-        .gatilho-ia-card {
-            background: linear-gradient(135deg, #059669 0%, #047857 100%);
-            color: white !important;
-            padding: 16px;
-            border-radius: 14px;
-            font-size: 19px !important;
-            margin: 8px 0;
-            font-weight: bold !important;
-            border-left: 6px solid #34D399;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-        }
+        .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; }
     </style>
     """
     st.markdown(css_code, unsafe_allow_html=True)
 
-    api_key = obter_api_key()
+    api_keys = obter_api_keys()
 
     with st.sidebar:
         st.header("Arquivos - Modo Catálogo")
@@ -386,9 +382,9 @@ def run():
 
         if img_pagina_bytes or texto_pagina_catalogo:
             with st.spinner("🤖 Gemini elaborando a canta e os gatilhos (Visão + Texto)..."):
-                analise_ia, gatilhos_ia = analisar_lote_unificado_catalogo(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_key)
+                analise_ia, gatilhos_ia = analisar_lote_unificado_catalogo(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_keys)
                 
-                # Exibe 🎯 Gatilhos ACIMA das considerações, como pedido anteriormente
+                # Exibe Gatilhos IA ACIMA das considerações
                 if gatilhos_ia:
                     st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
                     for gat in gatilhos_ia:
