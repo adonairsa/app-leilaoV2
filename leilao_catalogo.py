@@ -204,7 +204,7 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
     return dados_atualizados
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_unificado_catalogo(num_lote, dados_lote, texto_pagina_cat, api_keys):
+def analisar_lote_unificado_deepseek(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_keys):
     if not api_keys:
         return "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit.", []
 
