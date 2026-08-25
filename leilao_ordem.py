@@ -7,28 +7,34 @@ import time
 from io import BytesIO
 
 def obter_api_keys():
-    chaves = []
+    chaves_brutas = []
+    
+    # 1. Tenta carregar do Secrets do Streamlit
     try:
-        raw = st.secrets.get("GEMINI_API_KEYS") or st.secrets.get("GEMINI_API_KEY")
-        if raw:
-            if isinstance(raw, (list, tuple)):
-                chaves = [str(k) for k in raw]
-            else:
-                chaves = str(raw).split(",")
-    except:
+        for secret_name in ["GEMINI_API_KEYS", "GEMINI_API_KEY", "OPENAI_API_KEY"]:
+            if secret_name in st.secrets:
+                val = st.secrets[secret_name]
+                if isinstance(val, (list, tuple)):
+                    chaves_brutas.extend(val)
+                elif isinstance(val, str):
+                    chaves_brutas.extend(val.split(","))
+    except Exception:
         pass
-        
-    if not chaves:
-        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
-        if env_keys:
-            chaves = env_keys.split(",")
-            
+
+    # 2. Tenta carregar das variáveis de ambiente
+    if not chaves_brutas:
+        env_val = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
+        if env_val:
+            chaves_brutas.extend(env_val.split(","))
+
+    # 3. Limpeza rigorosa de cada chave
     chaves_limpas = []
-    for c in chaves:
-        c_clean = re.sub(r"[\[\]'\" \n\r\t]", "", str(c))
-        if c_clean:
-            chaves_limpas.append(c_clean)
-            
+    for item in chaves_brutas:
+        s = str(item).strip()
+        s_clean = re.sub(r"[\[\]'\" \n\r\t]", "", s)
+        if s_clean and s_clean not in chaves_limpas:
+            chaves_limpas.append(s_clean)
+
     return chaves_limpas
 
 @st.cache_data(ttl=7200, show_spinner=False)
@@ -161,7 +167,7 @@ def extrair_dados_oe(texto_oe_tuple):
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     if not api_keys:
-        return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
+        return "⚠️ Nenhuma chave GEMINI_API_KEY válida foi encontrada nos Secrets.", []
 
     headers = {"Content-Type": "application/json"}
     prompt_text = f"""
@@ -200,11 +206,11 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     """
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    modelos = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
     erros = []
 
-    for mod in modelos:
-        for api_key in api_keys:
+    for api_key in api_keys:
+        for mod in modelos:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -221,17 +227,17 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
                         return resposta_completa.strip(), []
                 
                 msg_erro = res_json.get('error', {}).get('message', response.text)
-                erros.append(f"[{mod}]: {msg_erro}")
+                erros.append(f"Chave ...{api_key[-6:]} ({mod}): {msg_erro}")
 
                 if response.status_code == 429:
                     time.sleep(1)
-                    continue
+                    break  # Tenta próxima chave se estourar o limite
                     
             except Exception as e:
-                erros.append(f"[{mod}]: {str(e)}")
+                erros.append(f"Erro de Conexão ({mod}): {str(e)}")
                 continue
 
-    detalhe_erro = erros[-1] if erros else "Erro desconhecido"
+    detalhe_erro = erros[-1] if erros else "Chave inválida ou recusada pelo Google."
     return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
