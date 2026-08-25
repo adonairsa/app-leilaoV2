@@ -7,7 +7,6 @@ import time
 from io import BytesIO
 
 def obter_api_keys():
-    # Agora aceita múltiplas chaves separadas por vírgula
     chaves = []
     try:
         if "GEMINI_API_KEYS" in st.secrets:
@@ -23,7 +22,7 @@ def obter_api_keys():
         if env_keys:
             chaves = [k.strip() for k in env_keys.split(",") if k.strip()]
             
-    return chaves
+    return chaves if chaves else [""]
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -114,14 +113,12 @@ def extrair_dados_oe(texto_oe_tuple):
                     dados_por_lote[lt_num] = dados
     return sequencia, dados_por_lote
 
-# ==================== ANÁLISE UNIFICADA COM RODÍZIO DE CHAVES ====================
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
-    if not api_keys:
+    if not api_keys or api_keys[0] == "":
         return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
 
     headers = {"Content-Type": "application/json"}
-
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio.
     Analise os dados da ORDEM DE ENTRADA do LOTE {num_lote}:
@@ -158,14 +155,13 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     """
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
     ultimo_erro = ""
 
     for mod in modelos:
-        for ver in ["v1beta", "v1"]:
-            # Rotação das chaves: Tenta a Chave 1, se der erro de cota, tenta a Chave 2, etc.
+        for tentativa in range(2): # Se estourar todas as chaves, ele tenta mais uma rodada
             for api_key in api_keys:
-                url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
                 try:
                     response = requests.post(url, headers=headers, json=payload, timeout=25)
                     res_json = response.json()
@@ -175,25 +171,34 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
                         if "---GATILHOS---" in resposta_completa:
                             partes = resposta_completa.split("---GATILHOS---")
                             consideracoes = partes[0].strip()
-                            gatilhos_brutos = partes[1].strip().split('\n')
-                            gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
+                            gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
                             return consideracoes, gatilhos_limpos[:4]
                         else:
                             return resposta_completa.strip(), []
                             
                     elif response.status_code == 429:
-                        ultimo_erro = "Cota de requisições excedida."
-                        continue  # 🔄 PULA PARA A PRÓXIMA CHAVE IMEDIATAMENTE
+                        ultimo_erro = "Cota limite"
+                        continue # Vai para a próxima chave
+                        
+                    elif response.status_code == 404:
+                        ultimo_erro = f"Modelo {mod} indisponível."
+                        break # Modelo não existe nesta chave, tenta o próximo modelo
                         
                     else:
                         ultimo_erro = res_json.get('error', {}).get('message', response.text)
-                        break  # Sai do loop de chaves, tenta o próximo modelo
+                        continue 
                         
                 except Exception as e:
                     ultimo_erro = str(e)
-                    continue  # Erro de rede, tenta a próxima chave
+                    continue
 
-    return f"⚠️ Erro na resposta da API: Todas as chaves falharam. Detalhe: {ultimo_erro}", []
+            # Se todas as chaves deram erro 429 (Cota limite), espera 5 segundos em silêncio e tenta de novo
+            if "Cota" in ultimo_erro:
+                time.sleep(5)
+            else:
+                break # Se for outro erro, não precisa tentar o ciclo novamente, vai para o próximo modelo
+
+    return f"⚠️ Erro de Conexão ou Limite Atingido. Detalhe: {ultimo_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
