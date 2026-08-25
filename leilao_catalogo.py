@@ -167,19 +167,25 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
     TEXTO DO CATÁLOGO:
     {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
 
-    Gere uma análise técnica ESTRUTURADA E COMERCIAL para o microfone:
+    REGRAS CRÍTICAS DE CONTEÚDO E FORMATO:
+    - NÃO use saudações (É PROIBIDO escrever 'Boa noite', 'Boa tarde', 'Olá', etc.).
+    - NÃO escreva introduções, saudações ou frases de cortesia.
+    - Comece a resposta DIRETAMENTE em "📌 **APRESENTAÇÃO DO LOTE**".
+    - Seja ULTRA-DIRETO, OBJETIVO e CONCISO (no máximo 1 a 2 frases curtas por item).
+
+    Siga ESTRITAMENTE este modelo:
 
     📌 **APRESENTAÇÃO DO LOTE**
-    [Apresentação do animal, categoria, peso/idade e porcentagem de venda].
+    [Resumo direto do animal, categoria, peso e oferta em 1 frase].
 
     🐂 **GENÉTICA DO PAI**
-    [Nome do pai + principais raçadores/linhagens consagradas na linha paterna].
+    [Nome do pai e raçadores de destaque na linha paterna em 1 frase].
 
-    com **GENÉTICA DA MÃE**
-    [Nome da mãe + principais raçadores/matrizes consagradas na linha materna].
+    🐄 **GENÉTICA DA MÃE**
+    [Nome da mãe e matrizes/linhagem materna em 1 frase].
 
     💉 **GENÉTICA DA REPRODUÇÃO / PRENHEZ**
-    [Detalhes do acasalamento: nome do touro da inseminação/prenhez/parto e valor do ventre].
+    [Status do acasalamento, touro acasalado e previsão em 1 frase].
     """
 
     parts = [{"text": prompt_text}]
@@ -188,7 +194,6 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
     payload = {"contents": [{"parts": parts}]}
-    
     modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
     ultimo_erro = ""
 
