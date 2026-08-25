@@ -105,7 +105,7 @@ def extrair_texto_imagem_claude(img_bytes, ant_keys):
                 },
                 {
                     "type": "text",
-                    "text": "Transcreva todo o texto da página deste catálogo de leilão: nome do animal, número do lote, categoria, pelagem, data de nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações."
+                    "text": "Transcreva exatamente todo o texto desta página do catálogo do leilão: nome do animal, número do lote, categoria, pelagem, nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações do lote."
                 }
             ]
         }]
@@ -121,8 +121,12 @@ def extrair_texto_imagem_claude(img_bytes, ant_keys):
             response = requests.post(url, headers=headers, json=payload, timeout=25)
             res_json = response.json()
             if response.status_code == 200 and 'content' in res_json:
-                return res_json['content'][0]['text']
-        except Exception:
+                txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
+                return "\n".join(txt_parts)
+            elif 'error' in res_json:
+                st.sidebar.error(f"Erro Claude: {res_json['error'].get('message')}")
+        except Exception as e:
+            st.sidebar.error(f"Erro conexão Claude: {str(e)}")
             continue
 
     return ""
@@ -135,10 +139,11 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
 
     num_clean = re.sub(r"\D", "", str(num_lote or ""))
 
+    # 1. Busca por número exato de lote (ex: Lote 100, LT 100, Lote: 100)
     if num_clean:
         n_int = int(num_clean)
         padroes = [
-            rf"\b(?:LOTE|LT|L|Nº|NUMERO)[\s:\.\-]*0*{n_int}\b",
+            rf"\b(?:LOTE|LT)[\s:\.\-]*0*{n_int}\b",
             rf"\bLOTE\s*0*{n_int}\b"
         ]
         for pattern in padroes:
@@ -146,19 +151,26 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                 if pagina and re.search(pattern, pagina, re.IGNORECASE):
                     return idx, pagina
 
+    # 2. Cruzamento por palavras do Nome do Animal/Produto (ex: "SIRIGUELA")
     if nome_animal:
-        ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILÕES", "LOTE"}
+        ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILOES", "LOTE", "VENTRE", "EMBRIÃO", "EMBRIAO"}
         palavras = [
             p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{4,}\b", nome_animal)
             if p.upper() not in ignore_words
         ]
-        
         if palavras:
             for idx, pagina in enumerate(texto_cat):
                 if pagina:
                     pag_upper = pagina.upper()
                     if any(p in pag_upper for p in palavras):
                         return idx, pagina
+
+    # 3. Contingência por número simples
+    if num_clean:
+        pattern = rf"\b0*{int(num_clean)}\b"
+        for idx, pagina in enumerate(texto_cat):
+            if pagina and re.search(pattern, pagina, re.IGNORECASE):
+                return idx, pagina
 
     return -1, ""
 
@@ -475,52 +487,56 @@ def run():
     sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes_oe)
 
     if sequencia_oe:
-        lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
+        if modo_ordenacao == "ORDEM DE ENTRADA":
+            lista_lotes = sequencia_oe.copy()
+        else:
+            lista_lotes = sorted(sequencia_oe, key=lambda x: int(re.sub(r"\D", "", x)) if re.sub(r"\D", "", x) else 999)
         ordem_atual = modo_ordenacao
     else:
         lista_lotes = []
         ordem_atual = "NENHUM LOTE ENCONTRADO"
 
-    if 'lote_idx_cat' not in st.session_state:
-        st.session_state.lote_idx_cat = 0
-
     if not lista_lotes:
         st.warning("Carregue a Ordem de Entrada e o Catálogo em PDF no menu lateral para começar!")
         st.stop()
 
-    if st.session_state.lote_idx_cat >= len(lista_lotes):
-        st.session_state.lote_idx_cat = 0
+    # PERSISTÊNCIA ROBUSTA DO LOTE SELECIONADO
+    if "lote_selecionado_cat" not in st.session_state or st.session_state.lote_selecionado_cat not in lista_lotes:
+        st.session_state.lote_selecionado_cat = lista_lotes[0]
 
-    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_cat + 1} de {len(lista_lotes)}"
+    num_lote = st.session_state.lote_selecionado_cat
+    idx_lote_atual = lista_lotes.index(num_lote)
+
+    ordem_texto = f"{ordem_atual} | Lote {idx_lote_atual + 1} de {len(lista_lotes)}"
     st.markdown(f'<div class="ordem-indicador">{ordem_texto}</div>', unsafe_allow_html=True)
 
     col_prev, col_next = st.columns(2)
     with col_prev:
-        if st.button("ANTERIOR", use_container_width=True, key="btn_prev_cat"):
-            st.session_state.lote_idx_cat = max(0, st.session_state.lote_idx_cat - 1)
+        if st.button("⬅️ ANTERIOR", use_container_width=True, key="btn_prev_cat"):
+            novo_idx = max(0, idx_lote_atual - 1)
+            st.session_state.lote_selecionado_cat = lista_lotes[novo_idx]
             st.rerun()
 
     with col_next:
-        if st.button("PRÓXIMO", use_container_width=True, key="btn_next_cat"):
-            st.session_state.lote_idx_cat = min(len(lista_lotes) - 1, st.session_state.lote_idx_cat + 1)
+        if st.button("PRÓXIMO ➡️", use_container_width=True, key="btn_next_cat"):
+            novo_idx = min(len(lista_lotes) - 1, idx_lote_atual + 1)
+            st.session_state.lote_selecionado_cat = lista_lotes[novo_idx]
             st.rerun()
 
-    def ao_mudar_selectbox_lote():
-        novo_lote = st.session_state.widget_lote_cat_select
-        if novo_lote in lista_lotes:
-            st.session_state.lote_idx_cat = lista_lotes.index(novo_lote)
+    def ao_mudar_select_lote():
+        st.session_state.lote_selecionado_cat = st.session_state.widget_lote_cat_select
 
     st.selectbox(
         "Ir para o lote:",
         options=lista_lotes,
-        index=st.session_state.lote_idx_cat,
+        index=idx_lote_atual,
         key="widget_lote_cat_select",
-        on_change=ao_mudar_selectbox_lote
+        on_change=ao_mudar_select_lote
     )
 
-    num_lote = lista_lotes[st.session_state.lote_idx_cat]
     dados_lote_oe = mapa_oe.get(num_lote, {})
 
+    # Auto-detecta página do catálogo por Número do Lote ou Nome do Animal
     nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
     pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
@@ -541,7 +557,7 @@ def run():
                 pag_input = st.number_input(
                     "Página do Catálogo:",
                     min_value=1,
-                    max_value=total_paginas_cat,
+                    max_value=max(1, total_paginas_cat),
                     key=state_pag_key
                 )
                 pag_selecionada = pag_input - 1
@@ -550,7 +566,7 @@ def run():
                 st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
 
             if pagina_detectada < 0:
-                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto. Ajuste a página no campo acima se necessário.")
+                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto do PDF. Ajuste o número acima se necessário.")
 
     texto_pagina_catalogo = texto_cat[pag_selecionada] if (texto_cat and 0 <= pag_selecionada < len(texto_cat)) else ""
     img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada) if (file_bytes_cat and pag_selecionada >= 0) else None
@@ -561,7 +577,7 @@ def run():
 
         if dados_ia:
             lote_texto = f"LOTE {num_lote}"
-            posicao_texto = dados_ia.get("posicao_entrada", dados_lote_oe.get("posicao", f"{st.session_state.lote_idx_cat + 1}º A ENTRAR"))
+            posicao_texto = dados_ia.get("posicao_entrada", dados_lote_oe.get("posicao", f"{idx_lote_atual + 1}º A ENTRAR"))
             st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
             
             if dados_ia.get("porcentagem_venda"):
@@ -646,4 +662,4 @@ def run():
         else:
             st.warning("⚠️ Envie o arquivo PDF do Catálogo no menu lateral para visualizar as páginas.")
 
-    precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys)
+    precarregar_proximos_lotes_cat(idx_lote_atual, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys)
