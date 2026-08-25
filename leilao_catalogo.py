@@ -6,6 +6,7 @@ import json
 import base64
 import difflib
 import hashlib
+import concurrent.futures
 from io import BytesIO
 
 st.set_page_config(
@@ -72,6 +73,7 @@ css_code = """
         border-radius: 12px;
         margin: 5px 0;
         border: 1px solid #334155;
+        min-height: 85px;
     }
     .nome-animal-box {
         background: #0284C7;
@@ -292,13 +294,8 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
 
 # ==================== CLAUDE INDEXA UMA PÁGINA DO CATÁLOGO ====================
 def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
-    """Lê uma página (imagem) do catálogo e retorna os dados estruturados do lote,
-    já em JSON. Usado pra construir o índice completo do catálogo uma única vez.
-    Retorna (dados, erro) — erro é None quando deu tudo certo."""
-    if not img_bytes:
-        return None, "sem imagem da página"
-    if not ant_keys:
-        return None, "ANTHROPIC_API_KEY não configurada"
+    if not img_bytes or not ant_keys:
+        return None
 
     base64_image = base64.b64encode(img_bytes).decode('utf-8')
     url = "https://api.anthropic.com/v1/messages"
@@ -322,13 +319,11 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
     - avo_materno (pai da mãe)
     - avo_materna (mãe da mãe)
     - observacoes (ex: "ventre para livre acasalamento", "somente reprodução",
-      "treinado em 3 tambores", "castrado", previsão de parto, etc — tudo que
-      estiver escrito como observação/status do lote)
+      "treinado em 3 tambores", "castrado", previsão de parto, etc)
 
-    Se a página NÃO for a ficha de um lote (capa, regras, índice), retorne
-    "numero_lote": null e os outros campos vazios.
+    Se a página NÃO for a ficha de um lote, retorne "numero_lote": null e os outros campos vazios.
 
-    Retorne APENAS um JSON válido, sem texto antes ou depois, no formato:
+    Retorne APENAS um JSON válido no formato:
     {
       "numero_lote": "01" ou null,
       "nome_animal": "",
@@ -349,7 +344,7 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
     """
 
     payload = {
-        "model": "claude-sonnet-5",
+        "model": "claude-3-5-sonnet-20241022",
         "max_tokens": 1200,
         "messages": [{
             "role": "user",
@@ -379,7 +374,6 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
             if response.status_code == 200 and 'content' in res_json:
                 txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
                 texto = "\n".join(txt_parts).strip()
-                # remove possíveis blocos ```json
                 texto = re.sub(r"^```json|```$", "", texto.strip(), flags=re.MULTILINE).strip()
                 try:
                     return json.loads(texto)
@@ -392,33 +386,41 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
 
     return None
 
-# ==================== CONSTRÓI ÍNDICE COMPLETO DO CATÁLOGO ====================
+# ==================== CONSTRÓI ÍNDICE COMPLETO PARALELIZADO ====================
 @st.cache_data(ttl=7200, show_spinner=False)
 def construir_indice_catalogo(file_bytes_cat, hash_arquivo, ant_keys, max_paginas=60):
-    """Percorre todas as páginas do catálogo (imagem), lê cada uma com o Claude
-    e monta um dicionário {numero_lote_normalizado: dados}. Roda uma vez por
-    arquivo (cacheado)."""
     indice = {}
     total = min(contar_paginas_pdf(file_bytes_cat), max_paginas)
     if total == 0 or not ant_keys:
         return indice, total
 
-    progresso = st.progress(0, text="Indexando catálogo (lendo imagens com IA)...")
-    for i in range(total):
+    progresso = st.progress(0, text="⚡ Indexando catálogo com Claude Visão...")
+
+    def _indexar_pagina(i):
         img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, i)
         dados = claude_indexar_pagina_catalogo(img_bytes, ant_keys)
         if dados and dados.get("numero_lote"):
-            chave = normalizar_lote(dados["numero_lote"])
-            if chave:
-                dados["_pagina"] = i
-                indice[chave] = dados
-        progresso.progress((i + 1) / total, text=f"Indexando catálogo... página {i + 1}/{total}")
+            dados["_pagina"] = i
+            return dados
+        return None
+
+    # Processamento paralelo de páginas (5 workers)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_indexar_pagina, i): i for i in range(total)}
+        concluidos = 0
+        for future in concurrent.futures.as_completed(futures):
+            concluidos += 1
+            progresso.progress(concluidos / total, text=f"⚡ Indexando catálogo... {concluidos}/{total} páginas")
+            res = future.result()
+            if res and res.get("numero_lote"):
+                chave = normalizar_lote(res["numero_lote"])
+                if chave:
+                    indice[chave] = res
+
     progresso.empty()
     return indice, total
 
 def encontrar_no_indice(num_lote_oe, nome_animal_oe, indice):
-    """Tenta casar o lote da O.E. com o índice do catálogo: primeiro por número
-    de lote, depois por similaridade de nome."""
     chave = normalizar_lote(num_lote_oe)
     if chave in indice:
         return indice[chave], -1
@@ -439,8 +441,13 @@ def encontrar_no_indice(num_lote_oe, nome_animal_oe, indice):
 
     return None, -1
 
-# ==================== DEEPSEEK CRUZA E GERA APRESENTAÇÃO ====================
-def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
+# ==================== DEEPSEEK CRUZA E GERA APRESENTAÇÃO (CACHEADO) ====================
+@st.cache_data(ttl=7200, show_spinner=False)
+def deepseek_cruzar_cached(num_lote, dados_ordem_json, dados_catalogo_json, ds_keys_tuple):
+    ds_keys = list(ds_keys_tuple)
+    dados_ordem = json.loads(dados_ordem_json)
+    dados_catalogo = json.loads(dados_catalogo_json)
+
     if not ds_keys:
         return None
 
@@ -456,15 +463,11 @@ def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
 
     Gere:
     1. "abertura": UMA frase curta (máx. 25 palavras), animada, pra abrir o lote
-       na pista — cite o nome do animal e algo que se destaque (genealogia forte,
-       treino, categoria).
+       na pista — cite o nome do animal e algo que se destaque.
     2. "encartes": lista com os dados mais importantes pra mostrar em tela
-       (CATEGORIA/RAÇA, PELAGEM, VENDEDOR, e outro campo relevante que existir
-       como PESO, IDADE ou STATUS).
-    3. "gatilhos": 3 gatilhos curtos de pista (frases de impacto, não repetir a
-       abertura).
-    4. "observacao_destaque": se houver algo relevante nas observações do
-       catálogo (reprodução, treino, previsão de parto), resuma em 1 frase.
+       (CATEGORIA/RAÇA, PELAGEM, VENDEDOR, PESO, IDADE ou STATUS).
+    3. "gatilhos": 3 gatilhos curtos de pista.
+    4. "observacao_destaque": resumo de observações do catálogo se houver.
 
     Retorne APENAS JSON:
     {{
@@ -501,6 +504,33 @@ def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
             continue
 
     return None
+
+def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
+    return deepseek_cruzar_cached(
+        num_lote,
+        json.dumps(dados_ordem, sort_keys=True),
+        json.dumps(dados_catalogo, sort_keys=True),
+        tuple(ds_keys)
+    )
+
+# ==================== PRÉ-CARREGAMENTO EM SEGUNDO PLANO ====================
+def precarregar_lotes_vizinhos(idx_atual, lista_lotes, mapa_oe, indice_catalogo, ds_keys):
+    """Carrega no cache o lote anterior (-1) e os próximos 3 (+1, +2, +3) em paralelo."""
+    if not ds_keys or not lista_lotes:
+        return
+
+    indices_alvo = [idx_atual - 1, idx_atual + 1, idx_atual + 2, idx_atual + 3]
+    validos = [i for i in indices_alvo if 0 <= i < len(lista_lotes)]
+
+    def _carregar_lote(i):
+        l_num = lista_lotes[i]
+        d_ordem = mapa_oe.get(l_num, {})
+        d_cat, _ = encontrar_no_indice(l_num, d_ordem.get("nome_animal", ""), indice_catalogo)
+        if d_cat:
+            deepseek_cruzar(l_num, d_ordem, d_cat, ds_keys)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        executor.map(_carregar_lote, validos)
 
 # ==================== CARD DE PEDIGREE ====================
 def renderizar_pedigree(dados_catalogo):
@@ -560,7 +590,6 @@ def run():
         st.warning("Carregue a O.E. e configure o DeepSeek!")
         st.stop()
 
-    # Índice completo do catálogo (imagem -> JSON por lote), construído uma vez
     indice_catalogo = {}
     total_paginas_cat = 0
     if file_bytes_cat and ant_keys:
@@ -580,7 +609,6 @@ def run():
     if st.session_state.lote_idx >= len(lista_lotes):
         st.session_state.lote_idx = 0
 
-    # Navegação
     st.markdown(
         f'<div class="ordem-indicador">{modo_ordenacao} | Lote {st.session_state.lote_idx + 1} de {len(lista_lotes)}</div>',
         unsafe_allow_html=True
@@ -599,7 +627,6 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx]
     dados_lote = mapa_oe.get(num_lote, {})
 
-    # Casa o lote da O.E. com o índice do catálogo
     dados_catalogo, _ = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
     pagina_detectada = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
 
@@ -613,8 +640,10 @@ def run():
 
     dados_finais = None
     if dados_catalogo and ds_keys:
-        with st.spinner("🔄 Cruzando informações..."):
-            dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
+        dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
+
+    # ⚡ PRÉ-CARREGAMENTO EM SEGUNDO PLANO DOS PRÓXIMOS 3 LOTES E DO ANTERIOR
+    precarregar_lotes_vizinhos(st.session_state.lote_idx, lista_lotes, mapa_oe, indice_catalogo, ds_keys)
 
     # ==================== LAYOUT ====================
     col_esquerda, col_direita = st.columns([1, 1])
