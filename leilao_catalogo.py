@@ -83,7 +83,7 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
 
     num_clean = re.sub(r"\D", "", str(num_lote or ""))
 
-    # 1. Busca por número explícito de lote (LOTE 100, LT 100, LT:100)
+    # 1. Busca por número de lote no texto do PDF
     if num_clean:
         n_int = int(num_clean)
         padroes = [
@@ -95,7 +95,7 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                 if pagina and re.search(pattern, pagina, re.IGNORECASE):
                     return idx, pagina
 
-    # 2. Cruzamento Inteligente por palavras do Nome do Animal / Produto (ex: "SIRIGUELA")
+    # 2. Cruzamento por palavras do Nome do Animal/Produto
     if nome_animal:
         ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILÕES", "LOTE"}
         palavras = [
@@ -109,13 +109,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                     pag_upper = pagina.upper()
                     if any(p in pag_upper for p in palavras):
                         return idx, pagina
-
-    # 3. Busca por número solto caso as anteriores falhem
-    if num_clean:
-        pattern = rf"\b0*{int(num_clean)}\b"
-        for idx, pagina in enumerate(texto_cat):
-            if pagina and re.search(pattern, pagina, re.IGNORECASE):
-                return idx, pagina
 
     return -1, ""
 
@@ -417,7 +410,6 @@ def run():
         .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
         .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
-        .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; margin-top: 15px; }
     </style>
     """
@@ -472,8 +464,18 @@ def run():
             st.session_state.lote_idx_cat = min(len(lista_lotes) - 1, st.session_state.lote_idx_cat + 1)
             st.rerun()
 
-    lote_selecionado = st.selectbox("Ir para o lote:", options=lista_lotes, index=st.session_state.lote_idx_cat, key="sel_cat")
-    st.session_state.lote_idx_cat = lista_lotes.index(lote_selecionado)
+    # CALLBACK PARA GARANTIR QUE O SELETOOR MANTENHA O LOTE ESCOLHIDO SEMPRE PERSISTENTE
+    def ao_mudar_lote_cat():
+        if "sel_cat_widget" in st.session_state and st.session_state.sel_cat_widget in lista_lotes:
+            st.session_state.lote_idx_cat = lista_lotes.index(st.session_state.sel_cat_widget)
+
+    st.selectbox(
+        "Ir para o lote:",
+        options=lista_lotes,
+        index=st.session_state.lote_idx_cat,
+        key="sel_cat_widget",
+        on_change=ao_mudar_lote_cat
+    )
 
     num_lote = lista_lotes[st.session_state.lote_idx_cat]
     dados_lote_oe = mapa_oe.get(num_lote, {})
@@ -482,7 +484,7 @@ def run():
     nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
     pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
-    # Controle de Página Isolado por Lote
+    # Controle de Página Isolado por Lote no Session State
     col_esquerda, col_direita = st.columns([1, 1])
 
     with col_direita:
@@ -492,13 +494,16 @@ def run():
             col_cat_title, col_cat_num = st.columns([2, 1])
             pag_sugerida = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
 
+            key_pag_persistencia = f"pag_cat_state_{num_lote}"
+            if key_pag_persistencia not in st.session_state:
+                st.session_state[key_pag_persistencia] = pag_sugerida
+
             with col_cat_num:
                 pag_input = st.number_input(
                     "Página do Catálogo:",
                     min_value=1,
                     max_value=total_paginas_cat,
-                    value=pag_sugerida,
-                    key=f"pag_input_num_{num_lote}"
+                    key=key_pag_persistencia
                 )
                 pag_selecionada = pag_input - 1
 
