@@ -105,7 +105,7 @@ def extrair_texto_imagem_claude(img_bytes, ant_keys):
                 },
                 {
                     "type": "text",
-                    "text": "Transcreva exatamente todo o texto desta página do catálogo do leilão: nome do animal, número do lote, categoria, pelagem, nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações do lote."
+                    "text": "Transcreva exatamente todo o texto desta página do catálogo do leilão: nome do animal, número do lote, espécie/raça (ex: Quarto de Milha, Nelore), categoria, pelagem, nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações."
                 }
             ]
         }]
@@ -139,7 +139,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
 
     num_clean = re.sub(r"\D", "", str(num_lote or ""))
 
-    # 1. Busca por número exato de lote (ex: Lote 100, LT 100, Lote: 100)
     if num_clean:
         n_int = int(num_clean)
         padroes = [
@@ -151,7 +150,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                 if pagina and re.search(pattern, pagina, re.IGNORECASE):
                     return idx, pagina
 
-    # 2. Cruzamento por palavras do Nome do Animal/Produto (ex: "SIRIGUELA")
     if nome_animal:
         ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILOES", "LOTE", "VENTRE", "EMBRIÃO", "EMBRIAO"}
         palavras = [
@@ -165,7 +163,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                     if any(p in pag_upper for p in palavras):
                         return idx, pagina
 
-    # 3. Contingência por número simples
     if num_clean:
         pattern = rf"\b0*{int(num_clean)}\b"
         for idx, pagina in enumerate(texto_cat):
@@ -366,7 +363,22 @@ def analisar_lote_catalogo_hybrid(num_lote, dados_lote, texto_pagina_cat, img_pa
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler as informações da Ordem de Entrada e da Transcrição do Catálogo de um Lote e organizar a canta e encartes visuais."""
+    Sua missão é identificar com precisão CIRÚRGICA a ESPÉCIE DO ANIMAL e usar os termos corretos do leilão.
+
+    REGRAS DE CLASSIFICAÇÃO DE ESPÉCIE E LINGUAGEM:
+    1. EQUINOS (Cavalo, Égua, Potro, Quarto de Milha, Crioulo, Mangalarga, etc.):
+       - Defina "especie_emoji": "🐴"
+       - Use termos como: 'Garanhão/Garra', 'Égua', 'Potro', 'Embrião/Ventre', '3 Tambores/Vaquejada/Trabalho/Pedigree'.
+       - É ESTRITAMENTE PROIBIDO usar termos como 'Touro', 'Vaca', 'Nelore', 'Corte' ou 'Carcaça'.
+    2. BOVINOS DE CORTE (Nelore, Angus, Brahman, Senepol, Macho, Fêmea de Corte):
+       - Defina "especie_emoji": "🐂"
+       - Use termos como: 'Touro', 'Matriz', 'Novilha', 'Carcaça', 'Raça Zebuína', 'Ganho de Peso', 'iABCZ/IQG'.
+    3. BOVINOS DE LEITE (Gir Leiteiro, Girolando, Holandês):
+       - Defina "especie_emoji": "🐄"
+       - Use termos como: 'Produção Leiteira', 'Lactação', 'Úbere', 'Matriz Leiteira'.
+    4. MUARES / ASININOS (Mula, Burro, Jumento):
+       - Defina "especie_emoji": "🫏"
+       - Use termos como: 'Mula', 'Jumento Pêga', 'Marcha/Lida'."""
 
     prompt_user = f"""
     Analise o LOTE {num_lote}:
@@ -379,13 +391,13 @@ def analisar_lote_catalogo_hybrid(num_lote, dados_lote, texto_pagina_cat, img_pa
     INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
     1. Crie uma lista de "ENCARTES" (cartões de informação) prioritários para aparecer na tela.
     2. Coloque APENAS o que existir com valor preenchido na Ordem ou no Catálogo (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
-    3. NUNCA invente dados se não existirem no texto.
-    4. Crie uma canta de venda agressiva ressaltando a linhagem materna e paterna.
+    3. Crie uma canta de venda agressiva em 1 frase respeitando 100% a espécie do animal.
 
     Retorne EXATAMENTE um JSON válido com a seguinte estrutura:
     {{
         "posicao_entrada": "{dados_lote.get('posicao')}",
         "nome_animal": "{dados_lote.get('nome_animal') or dados_lote.get('produto', '')}",
+        "especie_emoji": "🐴 ou 🐂 ou 🐄 ou 🫏",
         "porcentagem_venda": "{dados_lote.get('porcentagem_venda', '')}",
         "status_reproducao": "{dados_lote.get('info_reproducao', '')}",
         "tipo_reproducao": "{dados_lote.get('tipo_reproducao', '')}",
@@ -395,8 +407,8 @@ def analisar_lote_catalogo_hybrid(num_lote, dados_lote, texto_pagina_cat, img_pa
             {{"titulo": "VENDEDOR", "valor": "..."}}
         ],
         "apresentacao": "Frase agressiva de canta...",
-        "genetica_pai": "Linhagem paterna identificada ou vazio",
-        "genetica_mae": "Linhagem materna identificada ou vazio",
+        "genetica_pai": "Linhagem paterna/Garanhão identificada ou vazio",
+        "genetica_mae": "Linhagem materna/Égua identificada ou vazio",
         "reproducao_detalhe": "Detalhe da prenhez ou acasalamento se houver",
         "gatilhos": ["Gatilho 1", "Gatilho 2", "Gatilho 3"]
     }}
@@ -500,7 +512,6 @@ def run():
         st.warning("Carregue a Ordem de Entrada e o Catálogo em PDF no menu lateral para começar!")
         st.stop()
 
-    # PERSISTÊNCIA ROBUSTA DO LOTE SELECIONADO
     if "lote_selecionado_cat" not in st.session_state or st.session_state.lote_selecionado_cat not in lista_lotes:
         st.session_state.lote_selecionado_cat = lista_lotes[0]
 
@@ -536,7 +547,6 @@ def run():
 
     dados_lote_oe = mapa_oe.get(num_lote, {})
 
-    # Auto-detecta página do catálogo por Número do Lote ou Nome do Animal
     nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
     pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
@@ -566,7 +576,7 @@ def run():
                 st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
 
             if pagina_detectada < 0:
-                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto do PDF. Ajuste o número acima se necessário.")
+                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto. Ajuste a página no campo acima se necessário.")
 
     texto_pagina_catalogo = texto_cat[pag_selecionada] if (texto_cat and 0 <= pag_selecionada < len(texto_cat)) else ""
     img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada) if (file_bytes_cat and pag_selecionada >= 0) else None
@@ -576,6 +586,7 @@ def run():
             dados_ia, erro_ia = analisar_lote_catalogo_hybrid(num_lote, dados_lote_oe, texto_pagina_catalogo, img_pagina_bytes, ds_keys, ant_keys)
 
         if dados_ia:
+            emoji_esp = dados_ia.get("especie_emoji", "🐴")
             lote_texto = f"LOTE {num_lote}"
             posicao_texto = dados_ia.get("posicao_entrada", dados_lote_oe.get("posicao", f"{idx_lote_atual + 1}º A ENTRAR"))
             st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
@@ -593,7 +604,7 @@ def run():
                     st.markdown(f'<div class="banner-inseminacao">💉 {dados_ia["status_reproducao"]}</div>', unsafe_allow_html=True)
 
             if dados_ia.get("nome_animal"):
-                st.markdown(f'<div class="nome-animal-box">🐂 {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="nome-animal-box">{emoji_esp} {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
             encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
@@ -618,10 +629,11 @@ def run():
 
     with col_direita:
         if dados_ia:
+            emoji_esp = dados_ia.get("especie_emoji", "🐴")
             canta_html = f"📌 **APRESENTAÇÃO:** {dados_ia.get('apresentacao', '')}<br><br>"
-            if dados_ia.get('genetica_pai'): canta_html += f"🐂 **GENÉTICA DO PAI:** {dados_ia.get('genetica_pai')}<br><br>"
-            if dados_ia.get('genetica_mae'): canta_html += f"🐄 **GENÉTICA DA MÃE:** {dados_ia.get('genetica_mae')}<br><br>"
-            if dados_ia.get('reproducao_detalhe'): canta_html += f"💉 **REPRODUÇÃO:** {dados_ia.get('reproducao_detalhe')}"
+            if dados_ia.get('genetica_pai'): canta_html += f"{emoji_esp} **GENÉTICA DO PAI / GARANHÃO:** {dados_ia.get('genetica_pai')}<br><br>"
+            if dados_ia.get('genetica_mae'): canta_html += f"♀️ **GENÉTICA DA MÃE / ÉGUA:** {dados_ia.get('genetica_mae')}<br><br>"
+            if dados_ia.get('reproducao_detalhe'): canta_html += f"💉 **REPRODUÇÃO / ACASALAMENTO:** {dados_ia.get('reproducao_detalhe')}"
 
             st.markdown(f'''
             <div class="ai-consideracoes-box">
