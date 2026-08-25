@@ -4,9 +4,7 @@ import re
 import os
 import requests
 import json
-import time
 import base64
-import concurrent.futures
 from io import BytesIO
 
 st.set_page_config(
@@ -93,16 +91,6 @@ css_code = """
         margin: 6px 0;
         font-weight: bold;
     }
-    .debug-box {
-        background: #0F172A;
-        color: #94A3B8;
-        padding: 10px;
-        border-radius: 8px;
-        font-size: 12px;
-        margin: 5px 0;
-        max-height: 200px;
-        overflow-y: auto;
-    }
 </style>
 """
 st.markdown(css_code, unsafe_allow_html=True)
@@ -150,96 +138,7 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina):
         return None
     return None
 
-# ==================== DETECÇÃO AGRESSIVA DA PÁGINA ====================
-@st.cache_data
-def encontrar_pagina_catalogo_agressivo(texto_cat_tuple, num_lote, dados_lote):
-    """
-    Estratégia AGRESSIVA para encontrar a página do catálogo
-    Tenta TODOS os padrões possíveis
-    """
-    texto_cat = list(texto_cat_tuple)
-    
-    if not texto_cat:
-        return -1, ""
-    
-    num_clean = re.sub(r"\D", "", str(num_lote or ""))
-    nome_animal = dados_lote.get("nome_animal", "") or dados_lote.get("produto", "")
-    categoria = dados_lote.get("categoria", "")
-    
-    st.sidebar.markdown("### 🔍 DEBUG DETECÇÃO")
-    st.sidebar.text(f"Lote: {num_lote}")
-    st.sidebar.text(f"Nome: {nome_animal[:50]}")
-    st.sidebar.text(f"Categoria: {categoria}")
-    st.sidebar.text(f"Total páginas catálogo: {len(texto_cat)}")
-    
-    resultados = []
-    
-    # ESTRATÉGIA 1: "LOTE XX" exato
-    if num_clean:
-        n_int = int(num_clean)
-        patterns = [
-            rf"LOTE\s*0*{n_int}",
-            rf"LT\s*0*{n_int}",
-            rf"LOTE\s*N[º°]?\s*0*{n_int}",
-        ]
-        
-        for pattern in patterns:
-            for idx, pagina in enumerate(texto_cat):
-                if pagina and re.search(pattern, pagina, re.IGNORECASE):
-                    resultados.append((100, idx, pagina, f"LOTE exato: {pattern}"))
-    
-    # ESTRATÉGIA 2: Nome do animal em MAIÚSCULAS
-    if nome_animal:
-        # Remove palavras comuns
-        ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA",
-                       "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LOTE",
-                       "VIRTUAL", "PROMETIDA", "TERRA", "NELORE", "ANGUS"}
-        
-        palavras = [p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{3,}\b", nome_animal)
-                   if p.upper() not in ignore_words]
-        
-        if palavras:
-            for idx, pagina in enumerate(texto_cat):
-                if pagina:
-                    pag_upper = pagina.upper()
-                    matches = sum(1 for p in palavras if p in pag_upper)
-                    if matches > 0:
-                        score = matches * 20
-                        resultados.append((score, idx, pagina, f"Nome match: {matches} palavras"))
-    
-    # ESTRATÉGIA 3: Número do lote isolado
-    if num_clean:
-        pattern = rf"\b{int(num_clean)}\b"
-        for idx, pagina in enumerate(texto_cat):
-            if pagina and re.search(pattern, pagina):
-                # Verifica se NÃO é O.E.
-                if not re.search(r"QTD\s+IDADE\s+PESO", pagina, re.IGNORECASE):
-                    resultados.append((50, idx, pagina, "Número isolado"))
-    
-    # ESTRATÉGIA 4: Categoria do animal
-    if categoria:
-        cat_upper = categoria.upper()
-        for idx, pagina in enumerate(texto_cat):
-            if pagina and cat_upper in pagina.upper():
-                resultados.append((30, idx, pagina, f"Categoria: {categoria}"))
-    
-    # Ordena por score
-    if resultados:
-        resultados.sort(key=lambda x: x[0], reverse=True)
-        melhor = resultados[0]
-        st.sidebar.success(f"✅ Página {melhor[1] + 1} - {melhor[3]}")
-        return melhor[1], melhor[2]
-    
-    # FALLBACK: Se não encontrou, usa a primeira página que não é O.E.
-    for idx, pagina in enumerate(texto_cat):
-        if pagina and not re.search(r"QTD\s+IDADE\s+PESO", pagina, re.IGNORECASE):
-            st.sidebar.warning(f"⚠️ Fallback: usando página {idx + 1}")
-            return idx, pagina
-    
-    st.sidebar.error("❌ Nenhuma página encontrada")
-    return -1, ""
-
-# ==================== EXTRAÇÃO O.E. ====================
+# ==================== EXTRAÇÃO O.E. (SEMPRE FUNCIONA) ====================
 @st.cache_data(ttl=7200, show_spinner=False)
 def extrair_dados_oe_pdf(file_bytes):
     sequencia = []
@@ -271,6 +170,7 @@ def extrair_dados_oe_pdf(file_bytes):
                     if re.search(r"\d{2}/\d{2}/\d{4}", linha_limpa):
                         continue
                     
+                    # Padrão: "1º 16 1 15m 514Kg Novilha..."
                     m_pos = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
                     
                     if m_pos:
@@ -357,9 +257,49 @@ def extrair_dados_oe_pdf(file_bytes):
     
     return sequencia, dados_por_lote
 
+# ==================== DETECÇÃO DE PÁGINA ====================
+@st.cache_data
+def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, dados_lote):
+    texto_cat = list(texto_cat_tuple)
+    
+    if not texto_cat:
+        return -1, ""
+    
+    num_clean = re.sub(r"\D", "", str(num_lote or ""))
+    nome_animal = dados_lote.get("nome_animal", "") or dados_lote.get("produto", "")
+    
+    # Estratégia 1: "LOTE XX"
+    if num_clean:
+        n_int = int(num_clean)
+        for pattern in [rf"LOTE\s*0*{n_int}", rf"LT\s*0*{n_int}"]:
+            for idx, pagina in enumerate(texto_cat):
+                if pagina and re.search(pattern, pagina, re.IGNORECASE):
+                    return idx, pagina
+    
+    # Estratégia 2: Nome do animal
+    if nome_animal:
+        palavras = [p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{3,}\b", nome_animal)
+                   if p.upper() not in {"LIVRE", "LOTE", "NELORE", "ANGUS", "VIRTUAL", "TERRA", "PROMETIDA"}]
+        
+        for idx, pagina in enumerate(texto_cat):
+            if pagina:
+                pag_upper = pagina.upper()
+                matches = sum(1 for p in palavras if p in pag_upper)
+                if matches > 0:
+                    return idx, pagina
+    
+    # Estratégia 3: Número isolado
+    if num_clean:
+        pattern = rf"\b{int(num_clean)}\b"
+        for idx, pagina in enumerate(texto_cat):
+            if pagina and re.search(pattern, pagina):
+                if not re.search(r"QTD\s+IDADE\s+PESO", pagina, re.IGNORECASE):
+                    return idx, pagina
+    
+    return -1, ""
+
 # ==================== CLAUDE LÊ CATÁLOGO ====================
 def claude_ler_catalogo(img_bytes, ant_keys):
-    """Claude lê a imagem do CATÁLOGO"""
     if not img_bytes or not ant_keys:
         return ""
     
@@ -382,7 +322,7 @@ def claude_ler_catalogo(img_bytes, ant_keys):
                 },
                 {
                     "type": "text",
-                    "text": "Transcreva TODO o texto desta página do catálogo do leilão. Inclua nome do animal, lote, raça, categoria, pelagem, genealogia (pai, mãe, avôs), vendedor e observações."
+                    "text": "Transcreva TODO o texto desta página do catálogo. Inclua: nome do animal, lote, raça, categoria, pelagem, pai, mãe, avôs, vendedor."
                 }
             ]
         }]
@@ -402,10 +342,7 @@ def claude_ler_catalogo(img_bytes, ant_keys):
             if response.status_code == 200 and 'content' in res_json:
                 txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
                 return "\n".join(txt_parts)
-            else:
-                st.sidebar.error(f"Claude erro: {res_json.get('error', {}).get('message', '')}")
-        except Exception as e:
-            st.sidebar.error(f"Claude conexão: {str(e)}")
+        except:
             continue
     
     return ""
@@ -424,7 +361,7 @@ def deepseek_analisar(num_lote, dados_lote, texto_catalogo, ds_keys):
     CATÁLOGO:
     {texto_catalogo[:3000]}
     
-    Crie JSON:
+    Retorne JSON:
     {{
         "nome_animal": "...",
         "especie_emoji": "🐴/🐂/🐄/🫏",
@@ -516,61 +453,89 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx]
     dados_lote = mapa_oe.get(num_lote, {})
     
-    # DETECÇÃO AGRESSIVA
+    # MOSTRA DADOS DA O.E. PRIMEIRO (SEMPRE)
+    st.markdown(f'<div class="lote-destaque">LOTE {num_lote}<br><span style="font-size: 24px;">{dados_lote.get("posicao", "")}</span></div>', unsafe_allow_html=True)
+    
+    if dados_lote.get("porcentagem_venda"):
+        st.markdown(f'<div class="banner-venda">💎 VENDA DE {dados_lote["porcentagem_venda"]}</div>', unsafe_allow_html=True)
+    
+    if dados_lote.get("info_reproducao"):
+        st.markdown(f'<div class="banner-reproducao">{dados_lote["info_reproducao"]}</div>', unsafe_allow_html=True)
+    
+    # Mostra dados da O.E.
+    if dados_lote:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f'<div class="animal-info"><strong>CATEGORIA:</strong><br>{dados_lote.get("categoria", "-")}<br><br><strong>RAÇA:</strong><br>{dados_lote.get("raca", "-")}</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f'<div class="animal-info"><strong>PESO:</strong><br>{dados_lote.get("peso", "-")}<br><br><strong>IDADE:</strong><br>{dados_lote.get("idade", "-")}</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd", "-")}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor", "-")}</div>', unsafe_allow_html=True)
+    
+    # DETECÇÃO DA PÁGINA
     pagina_detectada = -1
     texto_pagina = ""
     
     if texto_cat and file_bytes_cat:
-        pagina_detectada, texto_pagina = encontrar_pagina_catalogo_agressivo(
+        pagina_detectada, texto_pagina = encontrar_pagina_catalogo(
             tuple(texto_cat), num_lote, dados_lote
         )
+        
+        # SE NÃO ENCONTROU, PERGUNTA AO USUÁRIO
+        if pagina_detectada < 0:
+            st.warning(f"⚠️ Não encontrei a página do Lote {num_lote} no catálogo automaticamente.")
+            
+            total_paginas = len(texto_cat)
+            pagina_manual = st.number_input(
+                f"Qual página do catálogo contém o Lote {num_lote}?",
+                min_value=1,
+                max_value=max(1, total_paginas),
+                value=1,
+                key=f"pagina_manual_{num_lote}"
+            )
+            pagina_detectada = pagina_manual - 1
+            texto_pagina = texto_cat[pagina_detectada] if pagina_detectada < len(texto_cat) else ""
+        else:
+            st.success(f"📖 Catálogo: Página {pagina_detectada + 1} detectada")
     
     # Imagem da página
     img_bytes = None
     if pagina_detectada >= 0 and file_bytes_cat:
         img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada)
     
-    col_esq, col_dir = st.columns([1, 1])
-    
-    with col_esq:
-        st.markdown(f'<div class="lote-destaque">LOTE {num_lote}<br><span style="font-size: 24px;">{dados_lote.get("posicao", "")}</span></div>', unsafe_allow_html=True)
+    # Layout para catálogo + IA
+    if img_bytes or texto_pagina:
+        col_esq, col_dir = st.columns([1, 1])
         
-        if dados_lote.get("porcentagem_venda"):
-            st.markdown(f'<div class="banner-venda">💎 VENDA DE {dados_lote["porcentagem_venda"]}</div>', unsafe_allow_html=True)
-        
-        if dados_lote.get("info_reproducao"):
-            st.markdown(f'<div class="banner-reproducao">{dados_lote["info_reproducao"]}</div>', unsafe_allow_html=True)
-        
-        with st.spinner("🤖 Claude lendo catálogo..."):
-            texto_ocr = ""
-            if img_bytes and ant_keys:
-                texto_ocr = claude_ler_catalogo(img_bytes, ant_keys)
-                
-                if texto_ocr:
-                    st.success(f"✅ Claude leu a página {pagina_detectada + 1}")
-                else:
-                    st.error("❌ Claude não conseguiu ler")
+        with col_esq:
+            st.markdown("### 🤖 ANÁLISE IA")
             
-            if texto_ocr and ds_keys:
-                dados_ia, erro = deepseek_analisar(num_lote, dados_lote, texto_ocr, ds_keys)
+            with st.spinner("Claude lendo catálogo..."):
+                texto_ocr = claude_ler_catalogo(img_bytes, ant_keys) if img_bytes else ""
                 
-                if dados_ia:
-                    for enc in dados_ia.get("encartes", []):
-                        if enc.get("valor"):
-                            st.markdown(f'<div class="animal-info"><strong>{enc["titulo"]}:</strong> {enc["valor"]}</div>', unsafe_allow_html=True)
+                if texto_ocr and ds_keys:
+                    dados_ia, erro = deepseek_analisar(num_lote, dados_lote, texto_ocr, ds_keys)
                     
-                    st.markdown("### 🎯 GATILHOS")
-                    for g in dados_ia.get("gatilhos", []):
-                        st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
-    
-    with col_dir:
-        if img_bytes:
-            st.markdown(f"**📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}**")
-            st.image(img_bytes, use_container_width=True)
+                    if dados_ia:
+                        for enc in dados_ia.get("encartes", []):
+                            if enc.get("valor"):
+                                st.markdown(f'<div class="animal-info"><strong>{enc["titulo"]}:</strong> {enc["valor"]}</div>', unsafe_allow_html=True)
+                        
+                        st.markdown("### 🎯 GATILHOS")
+                        for g in dados_ia.get("gatilhos", []):
+                            st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
         
-        if texto_ocr:
-            with st.expander("📖 Texto Claude"):
-                st.text(texto_ocr[:1500])
+        with col_dir:
+            if img_bytes:
+                st.markdown(f"**📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}**")
+                st.image(img_bytes, use_container_width=True)
+            
+            if texto_ocr:
+                with st.expander("📖 Texto Claude"):
+                    st.text(texto_ocr[:1500])
 
 if __name__ == "__main__":
     run()
