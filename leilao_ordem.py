@@ -221,10 +221,25 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler a associação exata entre o Cabeçalho da Tabela do PDF e os dados do Lote para organizar os encartes visuais da tela e a canta da pista."""
+    Sua missão é identificar com precisão CIRÚRGICA a ESPÉCIE DO ANIMAL e usar os termos corretos de leilão.
+
+    REGRAS DE CLASSIFICAÇÃO DE ESPÉCIE E LINGUAGEM:
+    1. EQUINOS (Cavalo, Égua, Potro, Quarto de Milha, Crioulo, Mangalarga, etc.):
+       - Defina "especie_emoji": "🐴"
+       - Use termos como: 'Garanhão/Garra', 'Égua', 'Potro', 'Embrião/Ventre', '3 Tambores/Vaquejada/Trabalho/Pedigree'.
+       - É ESTRITAMENTE PROIBIDO usar termos como 'Touro', 'Vaca', 'Nelore', 'Corte' ou 'Carcaça'.
+    2. BOVINOS DE CORTE (Nelore, Angus, Brahman, Senepol, Macho, Fêmea de Corte):
+       - Defina "especie_emoji": "🐂"
+       - Use termos como: 'Touro', 'Matriz', 'Novilha', 'Carcaça', 'Raça Zebuína', 'Ganho de Peso', 'iABCZ/IQG'.
+3. BOVINOS DE LEITE (Gir Leiteiro, Girolando, Holandês):
+       - Defina "especie_emoji": "🐄"
+       - Use termos como: 'Produção Leiteira', 'Lactação', 'Úbere', 'Matriz Leiteira'.
+    4. MUARES / ASININOS (Mula, Burro, Jumento):
+       - Defina "especie_emoji": "🫏"
+       - Use termos como: 'Mula', 'Jumento Pêga', 'Marcha/Lida'."""
 
     prompt_user = f"""
-    Analise os dados rotulados do LOTE {num_lote}:
+    Analise o LOTE {num_lote}:
 
     📍 LINHA DA ORDEM COM CABEÇALHO ASSOCIADO (CHAVE: VALOR):
     {dados_lote.get('linha_contextualizada', dados_lote.get('linha_completa', ''))}
@@ -232,13 +247,13 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
     INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
     1. Crie a lista de "ENCARTES" (cartões visuais da tela) associando exatamente o nome da coluna no cabeçalho com o dado do lote.
     2. Coloque APENAS encartes que tenham conteúdo útil (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDORES, QTD).
-    3. Se não houver Peso ou Idade no cabeçalho/linha, NÃO crie os encartes de Peso ou Idade.
-    4. Crie uma canta de venda agressiva em 1 frase exaltando o produto e o vendedor.
+    3. Crie uma canta de venda agressiva em 1 frase respeitando 100% a espécie do animal.
 
     Retorne EXATAMENTE um JSON válido neste formato:
     {{
         "posicao_entrada": "{dados_lote.get('posicao')}",
         "nome_animal": "{dados_lote.get('nome_animal') or dados_lote.get('produto', '')}",
+        "especie_emoji": "🐴 ou 🐂 ou 🐄 ou 🫏",
         "porcentagem_venda": "{dados_lote.get('porcentagem_venda', '')}",
         "status_reproducao": "{dados_lote.get('info_reproducao', '')}",
         "tipo_reproducao": "{dados_lote.get('tipo_reproducao', '')}",
@@ -246,9 +261,9 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
             {{"titulo": "NOME_DO_CABEÇALHO", "valor": "VALOR_DA_COLUNA"}}
         ],
         "apresentacao": "Frase agressiva de canta...",
-        "genetica_pai": "Linhagem paterna se houver no texto",
-        "genetica_mae": "Linhagem materna se houver no texto",
-        "reproducao_detalhe": "Detalhes de prenhez se houver",
+        "genetica_pai": "Linhagem paterna/Garanhão se houver no texto",
+        "genetica_mae": "Linhagem materna/Égua se houver no texto",
+        "reproducao_detalhe": "Detalhes de prenhez/acasalamento se houver",
         "gatilhos": [
             "Gatilho curto 1",
             "Gatilho curto 2",
@@ -342,49 +357,52 @@ def run():
     sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes)
 
     if sequencia_oe:
-        lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
+        if modo_ordenacao == "ORDEM DE ENTRADA":
+            lista_lotes = sequencia_oe.copy()
+        else:
+            lista_lotes = sorted(sequencia_oe, key=lambda x: int(re.sub(r"\D", "", x)) if re.sub(r"\D", "", x) else 999)
         ordem_atual = modo_ordenacao
     else:
         lista_lotes = []
         ordem_atual = "NENHUM LOTE ENCONTRADO"
 
-    if 'lote_idx_oe' not in st.session_state:
-        st.session_state.lote_idx_oe = 0
-
     if not lista_lotes:
         st.warning("Carregue a Ordem de Entrada (PDF) no menu lateral para começar!")
         st.stop()
 
-    if st.session_state.lote_idx_oe >= len(lista_lotes):
-        st.session_state.lote_idx_oe = 0
+    if "lote_selecionado_ordem" not in st.session_state or st.session_state.lote_selecionado_ordem not in lista_lotes:
+        st.session_state.lote_selecionado_ordem = lista_lotes[0]
 
-    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_oe + 1} de {len(lista_lotes)}"
+    num_lote = st.session_state.lote_selecionado_ordem
+    idx_lote_atual = lista_lotes.index(num_lote)
+
+    ordem_texto = f"{ordem_atual} | Lote {idx_lote_atual + 1} de {len(lista_lotes)}"
     st.markdown(f'<div class="ordem-indicador">{ordem_texto}</div>', unsafe_allow_html=True)
 
     col_prev, col_next = st.columns(2)
     with col_prev:
-        if st.button("ANTERIOR", use_container_width=True, key="prev_oe"):
-            st.session_state.lote_idx_oe = max(0, st.session_state.lote_idx_oe - 1)
+        if st.button("⬅️ ANTERIOR", use_container_width=True, key="prev_oe_btn"):
+            novo_idx = max(0, idx_lote_atual - 1)
+            st.session_state.lote_selecionado_ordem = lista_lotes[novo_idx]
             st.rerun()
 
     with col_next:
-        if st.button("PRÓXIMO", use_container_width=True, key="next_oe"):
-            st.session_state.lote_idx_oe = min(len(lista_lotes) - 1, st.session_state.lote_idx_oe + 1)
+        if st.button("PRÓXIMO ➡️", use_container_width=True, key="next_oe_btn"):
+            novo_idx = min(len(lista_lotes) - 1, idx_lote_atual + 1)
+            st.session_state.lote_selecionado_ordem = lista_lotes[novo_idx]
             st.rerun()
 
-    def ao_mudar_lote_ordem():
-        if "sel_oe_widget" in st.session_state and st.session_state.sel_oe_widget in lista_lotes:
-            st.session_state.lote_idx_oe = lista_lotes.index(st.session_state.sel_oe_widget)
+    def ao_mudar_select_lote():
+        st.session_state.lote_selecionado_ordem = st.session_state.sel_oe_widget
 
     st.selectbox(
         "Ir para o lote:",
         options=lista_lotes,
-        index=st.session_state.lote_idx_oe,
+        index=idx_lote_atual,
         key="sel_oe_widget",
-        on_change=ao_mudar_lote_ordem
+        on_change=ao_mudar_select_lote
     )
 
-    num_lote = lista_lotes[st.session_state.lote_idx_oe]
     dados_lote = mapa_oe.get(num_lote, {})
 
     col_esquerda, col_direita = st.columns([1, 1])
@@ -394,8 +412,9 @@ def run():
             dados_ia, erro_ia = analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys)
 
         if dados_ia:
+            emoji_esp = dados_ia.get("especie_emoji", "🐴")
             lote_texto = f"LOTE {num_lote}"
-            posicao_texto = dados_ia.get("posicao_entrada", dados_lote.get("posicao", f"{st.session_state.lote_idx_oe + 1}º A ENTRAR"))
+            posicao_texto = dados_ia.get("posicao_entrada", dados_lote.get("posicao", f"{idx_lote_atual + 1}º A ENTRAR"))
             st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
             
             if dados_ia.get("porcentagem_venda"):
@@ -411,7 +430,7 @@ def run():
                     st.markdown(f'<div class="banner-inseminacao">💉 {dados_ia["status_reproducao"]}</div>', unsafe_allow_html=True)
 
             if dados_ia.get("nome_animal"):
-                st.markdown(f'<div class="nome-animal-box">bull {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="nome-animal-box">{emoji_esp} {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
             encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
@@ -436,10 +455,11 @@ def run():
 
     with col_direita:
         if dados_ia:
+            emoji_esp = dados_ia.get("especie_emoji", "🐴")
             canta_html = f"📌 **APRESENTAÇÃO:** {dados_ia.get('apresentacao', '')}<br><br>"
-            if dados_ia.get('genetica_pai'): canta_html += f"🐂 **GENÉTICA DO PAI:** {dados_ia.get('genetica_pai')}<br><br>"
-            if dados_ia.get('genetica_mae'): canta_html += f"🐄 **GENÉTICA DA MÃE:** {dados_ia.get('genetica_mae')}<br><br>"
-            if dados_ia.get('reproducao_detalhe'): canta_html += f"💉 **REPRODUÇÃO:** {dados_ia.get('reproducao_detalhe')}"
+            if dados_ia.get('genetica_pai'): canta_html += f"{emoji_esp} **GENÉTICA DO PAI / GARANHÃO:** {dados_ia.get('genetica_pai')}<br><br>"
+            if dados_ia.get('genetica_mae'): canta_html += f"♀️ **GENÉTICA DA MÃE / ÉGUA:** {dados_ia.get('genetica_mae')}<br><br>"
+            if dados_ia.get('reproducao_detalhe'): canta_html += f"💉 **REPRODUÇÃO / ACASALAMENTO:** {dados_ia.get('reproducao_detalhe')}"
 
             st.markdown(f'''
             <div class="ai-consideracoes-box">
@@ -465,4 +485,4 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-    precarregar_proximos_lotes(st.session_state.lote_idx_oe, lista_lotes, mapa_oe, api_keys)
+    precarregar_proximos_lotes(idx_lote_atual, lista_lotes, mapa_oe, api_keys)
