@@ -148,45 +148,51 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
                 break
     return dados_atualizados
 
+# ==================== ANÁLISE UNIFICADA DA IA (LEITURA VISUAL + TEXTO) ====================
 @st.cache_data(show_spinner=False)
-def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
+def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
     if not api_key:
-        return "⚠️ Insira a GEMINI_API_KEY nos Secrets do Streamlit."
+        return "⚠️ Insira a GEMINI_API_KEY nos Secrets do Streamlit.", []
 
     api_key_clean = api_key.strip()
     headers = {"Content-Type": "application/json"}
 
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio.
-    Analise o LOTE {num_lote}:
-    - Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    Analise os dados, o texto e a IMAGEM da folha do LOTE {num_lote}:
+
+    DADOS DA ORDEM:
+    - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
     - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
-    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
+    - Status: {dados_lote.get('info_reproducao', 'N/A')}
+    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} | {dados_lote.get('peso', 'N/A')} | {dados_lote.get('idade', 'N/A')}
 
     TEXTO DO CATÁLOGO:
-    {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
+    {texto_pagina_cat[:1000] if texto_pagina_cat else 'N/A'}
 
-    REGRAS CRÍTICAS DE CONTEÚDO E FORMATO:
+    REGRAS CRÍTICAS:
     1. É PROIBIDO usar saudações (Boa noite, Olá, etc).
-    2. É PROIBIDO dizer "Não há informações", "Não foram fornecidas informações" ou "Desconhecido". Se o lote tiver poucas informações, NUNCA foque no que falta.
-    3. Se faltarem dados do Pai, Mãe ou Prenhez, SIMPLESMENTE OMITE ESSES TÓPICOS.
-    4. Quando houver pouca informação, crie uma "APRESENTAÇÃO DO LOTE" exaltando fortemente a raça, idade, peso e a categoria do animal. Transforme o pouco que tem em um argumento de venda valorizado.
-    5. Seja ULTRA-DIRETO (máximo 1 a 2 frases curtas por item).
+    2. É PROIBIDO dizer que faltam informações. Oculte tópicos sem dados e exalte o que tem na tela.
+    3. Seja ULTRA-DIRETO. Frases curtas.
 
-    MOLDE DE RESPOSTA (Use apenas os tópicos que tiverem dados reais para exaltar):
+    Gere a resposta EXATAMENTE neste formato (não mude as marcações):
 
     📌 **APRESENTAÇÃO DO LOTE**
-    [Venda agressiva exaltando os pontos fortes do animal, idade, categoria e a oportunidade].
+    [Venda agressiva exaltando os pontos fortes em 1 frase]
 
     🐂 **GENÉTICA DO PAI**
-    [APENAS SE HOUVER DADOS: Linhagem paterna em 1 frase].
+    [Linhagem paterna, se houver]
 
     🐄 **GENÉTICA DA MÃE**
-    [APENAS SE HOUVER DADOS: Linhagem materna em 1 frase].
+    [Linhagem materna, se houver]
 
     💉 **REPRODUÇÃO / PRENHEZ**
-    [APENAS SE HOUVER DADOS: Status reprodutivo em 1 frase].
+    [Status reprodutivo, se houver]
+
+    ---GATILHOS---
+    [Gatilho de canta curto 1 desenhado para o lote]
+    [Gatilho de canta curto 2 desenhado para o lote]
+    [Gatilho de canta curto 3 desenhado para o lote]
     """
 
     parts = [{"text": prompt_text}]
@@ -195,66 +201,34 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
     payload = {"contents": [{"parts": parts}]}
-    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
+    
+    # Modelos suportados pela chave AQ. e visão computacional
+    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     ultimo_erro = ""
 
     for mod in modelos:
         for ver in ["v1beta", "v1"]:
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                response = requests.post(url, headers=headers, json=payload, timeout=25)
                 res_json = response.json()
                 if response.status_code == 200 and 'candidates' in res_json:
-                    return res_json['candidates'][0]['content']['parts'][0]['text']
+                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                    
+                    if "---GATILHOS---" in resposta_completa:
+                        partes = resposta_completa.split("---GATILHOS---")
+                        consideracoes = partes[0].strip()
+                        gatilhos_brutos = partes[1].strip().split('\n')
+                        gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
+                        return consideracoes, gatilhos_limpos[:4]
+                    else:
+                        return resposta_completa.strip(), []
                 else:
                     ultimo_erro = res_json.get('error', {}).get('message', response.text)
             except Exception as e:
                 ultimo_erro = str(e)
 
-    return f"⚠️ Erro na resposta da API: {ultimo_erro}"
-
-@st.cache_data(show_spinner=False)
-def gerar_gatilhos_ia_especificos(num_lote, dados_lote, texto_pagina_cat, api_key):
-    if not api_key or not dados_lote:
-        return []
-
-    api_key_clean = api_key.strip()
-    headers = {"Content-Type": "application/json"}
-
-    prompt_text = f"""
-    Você é um leiloeiro de elite puxando lances de pista rápido no microfone.
-    Analise os dados deste LOTE {num_lote}:
-    - Produto/Nome: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
-    - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Reprodução: {dados_lote.get('info_reproducao', 'N/A')}
-    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} | {dados_lote.get('peso', 'N/A')} | {dados_lote.get('idade', 'N/A')}
-    - Texto Catálogo: {texto_pagina_cat[:600] if texto_pagina_cat else ''}
-
-    Gere EXATAMENTE 3 a 4 GATILHOS DE CANTA ULTRA-ESPECÍFICOS e DESENHADOS para este animal.
-    Regras:
-    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso, genealogia ou a mãe se existirem). Se não existirem, exalte a categoria (ex: "Matriz espetacular!").
-    - Frases curtas, chamativas e de alto impacto para gritar no microfone (máximo 8 a 10 palavras por gatilho).
-    - NÃO use saudações, números, introduções ou marcadores genéricos.
-    - Separe cada gatilho em uma nova linha.
-    """
-
-    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
-
-    for mod in modelos:
-        for ver in ["v1beta", "v1"]:
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
-                res_json = response.json()
-                if response.status_code == 200 and 'candidates' in res_json:
-                    text = res_json['candidates'][0]['content']['parts'][0]['text']
-                    linhas = [l.strip('- *123.').strip() for l in text.split('\n') if l.strip()]
-                    return linhas[:4]
-            except:
-                pass
-
-    return []
+    return f"⚠️ Erro na resposta da API: {ultimo_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
@@ -390,15 +364,7 @@ def run():
             with c3:
                 st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd","-")}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor","-")}</div>', unsafe_allow_html=True)
 
-        # 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA) - COLOCADOS ACIMA DOS GATILHOS DO MICROFONE
-        with st.spinner("⚡ IA desenhando gatilhos de canta para o lote..."):
-            gatilhos_ia = gerar_gatilhos_ia_especificos(num_lote, dados_lote, texto_pagina_catalogo, api_key)
-            if gatilhos_ia:
-                st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
-                for gat in gatilhos_ia:
-                    st.markdown(f'<div class="gatilho-ia-card">🔥 {gat}</div>', unsafe_allow_html=True)
-
-        st.markdown("### 🎙️ GATILHOS PARA O MICROFONE")
+        st.markdown("### 🎙️ GATILHOS DE PISTA")
         gatilhos = gerar_gatilhos_padrao(dados_lote)
         for g in gatilhos:
             st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
@@ -409,11 +375,17 @@ def run():
             st.image(img_pagina_bytes, use_container_width=True)
 
         if img_pagina_bytes or texto_pagina_catalogo:
-            with st.spinner("🤖 Gemini analisando a árvore e o acasalamento do lote..."):
-                analise_ia = analisar_lote_com_gemini(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_key)
+            with st.spinner("🤖 Gemini elaborando a canta e os gatilhos (Visão + Texto)..."):
+                analise_ia, gatilhos_ia = analisar_lote_unificado_catalogo(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_key)
+                
                 st.markdown(f'''
                 <div class="ai-consideracoes-box">
                     <h3 style="margin-top:0; color:#818CF8; font-size:18px;">🤖 CONSIDERAÇÕES DA IA (LINHAGEM & REPRODUÇÃO)</h3>
                     <div>{analise_ia}</div>
                 </div>
                 ''', unsafe_allow_html=True)
+
+                if gatilhos_ia:
+                    st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
+                    for gat in gatilhos_ia:
+                        st.markdown(f'<div class="gatilho-ia-card">🔥 {gat}</div>', unsafe_allow_html=True)
