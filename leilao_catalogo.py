@@ -141,6 +141,15 @@ css_code = """
         font-style: italic;
         border: 2px solid #10B981;
     }
+    .cache-badge {
+        background: #065F46;
+        color: #6EE7B7;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        display: inline-block;
+        margin-bottom: 5px;
+    }
 </style>
 """
 st.markdown(css_code, unsafe_allow_html=True)
@@ -165,14 +174,8 @@ def normalizar_lote(valor):
     digitos = re.sub(r"\D", "", str(valor))
     return str(int(digitos)) if digitos else ""
 
-def hash_bytes(b):
-    if not b:
-        return ""
-    return hashlib.md5(b).hexdigest()
-
-# ==================== PROCESSAMENTO (SEM CACHE PROBLEMÁTICO) ====================
+# ==================== PROCESSAMENTO ====================
 def processar_pdf_texto(file_bytes):
-    """SEM @st.cache_data - sempre processa"""
     paginas = []
     if not file_bytes:
         return paginas
@@ -186,7 +189,6 @@ def processar_pdf_texto(file_bytes):
     return paginas
 
 def contar_paginas_pdf(file_bytes):
-    """SEM cache - sempre conta"""
     if not file_bytes:
         return 0
     try:
@@ -196,7 +198,6 @@ def contar_paginas_pdf(file_bytes):
         return 0
 
 def obter_imagem_bytes_pagina(file_bytes, num_pagina, resolucao=150, qualidade=85):
-    """SEM cache - sempre renderiza"""
     if not file_bytes or num_pagina < 0:
         return None
     try:
@@ -326,7 +327,7 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
 
     return None
 
-# ==================== ÍNDICE DO CATÁLOGO (SEM CACHE) ====================
+# ==================== ÍNDICE DO CATÁLOGO ====================
 def construir_indice_catalogo(file_bytes_cat, ant_keys, max_paginas=60):
     indice = {}
     total = min(contar_paginas_pdf(file_bytes_cat), max_paginas)
@@ -411,6 +412,52 @@ def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
 
     return None
 
+# ==================== CACHE EM SESSION STATE ====================
+if 'cache_lotes' not in st.session_state:
+    st.session_state.cache_lotes = {}
+
+def processar_lote_completo(num_lote, dados_lote, indice_catalogo, ds_keys):
+    """Processa um lote completo e salva no cache"""
+    chave = f"{num_lote}"
+    
+    # Se já está em cache, retorna
+    if chave in st.session_state.cache_lotes:
+        return st.session_state.cache_lotes[chave]
+    
+    # Encontra no catálogo
+    dados_catalogo = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
+    pagina = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
+    
+    # Cruza com DeepSeek
+    dados_finais = None
+    if dados_catalogo and ds_keys:
+        dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
+    
+    resultado = {
+        "dados_catalogo": dados_catalogo,
+        "dados_finais": dados_finais,
+        "pagina": pagina
+    }
+    
+    # Salva no cache
+    st.session_state.cache_lotes[chave] = resultado
+    
+    return resultado
+
+def precarregar_proximos_lotes(idx_atual, lista_lotes, mapa_oe, indice_catalogo, ds_keys, qtd=3):
+    """Precarrega os próximos N lotes de forma SIMPLES (sem threads)"""
+    for i in range(1, qtd + 1):
+        idx_proximo = idx_atual + i
+        if idx_proximo < len(lista_lotes):
+            num_lt = lista_lotes[idx_proximo]
+            chave = f"{num_lt}"
+            
+            # Só processa se ainda não está em cache
+            if chave not in st.session_state.cache_lotes:
+                dados_lt = mapa_oe.get(num_lt, {})
+                # Processa silenciosamente (sem spinner)
+                processar_lote_completo(num_lt, dados_lt, indice_catalogo, ds_keys)
+
 # ==================== RENDERIZAR PEDIGREE ====================
 def renderizar_pedigree(dados_catalogo):
     if not dados_catalogo:
@@ -447,6 +494,9 @@ def run():
         max_paginas_catalogo = st.number_input(
             "Máx. de páginas do catálogo", min_value=1, max_value=300, value=60
         )
+        
+        st.markdown("---")
+        qtd_precarregar = st.slider("Precarregar próximos lotes:", min_value=0, max_value=5, value=3)
 
     file_bytes_oe = file_oe.getvalue() if file_oe else None
     file_bytes_cat = file_cat.getvalue() if file_cat else None
@@ -465,7 +515,7 @@ def run():
         st.warning("Carregue a O.E. e configure o DeepSeek!")
         st.stop()
 
-    # Índice do catálogo (SEM CACHE - sempre processa)
+    # Índice do catálogo
     indice_catalogo = {}
     total_paginas_cat = 0
     if file_bytes_cat and ant_keys:
@@ -502,15 +552,27 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx]
     dados_lote = mapa_oe.get(num_lote, {})
 
-    # Encontra no índice
-    dados_catalogo = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
-    pagina_detectada = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
+    # Processa lote atual (usa cache se existir)
+    resultado = processar_lote_completo(num_lote, dados_lote, indice_catalogo, ds_keys)
+    dados_catalogo = resultado.get("dados_catalogo")
+    dados_finais = resultado.get("dados_finais")
+    pagina_detectada = resultado.get("pagina", -1)
+    
+    # Mostra se veio do cache
+    if f"{num_lote}" in st.session_state.cache_lotes and st.session_state.cache_lotes[f"{num_lote}"].get("_exibido"):
+        st.markdown('<span class="cache-badge">⚡ CACHE</span>', unsafe_allow_html=True)
+    
+    # Marca como exibido
+    st.session_state.cache_lotes[f"{num_lote}"] = {
+        **resultado,
+        "_exibido": True
+    }
 
-    # Cruzamento com DeepSeek
-    dados_finais = None
-    if dados_catalogo and ds_keys:
-        with st.spinner("🔄 Cruzando informações..."):
-            dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
+    # PRECARREGA OS PRÓXIMOS LOTES (SILENCIOSO)
+    if qtd_precarregar > 0:
+        precarregar_proximos_lotes(
+            st.session_state.lote_idx, lista_lotes, mapa_oe, indice_catalogo, ds_keys, qtd_precarregar
+        )
 
     # ==================== LAYOUT ====================
     col_esquerda, col_direita = st.columns([1, 1])
