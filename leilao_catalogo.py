@@ -168,24 +168,25 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
     {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
 
     REGRAS CRÍTICAS DE CONTEÚDO E FORMATO:
-    - NÃO use saudações (É PROIBIDO escrever 'Boa noite', 'Boa tarde', 'Olá', etc.).
-    - NÃO escreva introduções, saudações ou frases de cortesia.
-    - Comece a resposta DIRETAMENTE em "📌 **APRESENTAÇÃO DO LOTE**".
-    - Seja ULTRA-DIRETO, OBJETIVO e CONCISO (no máximo 1 a 2 frases curtas por item).
+    1. É PROIBIDO usar saudações (Boa noite, Olá, etc).
+    2. É PROIBIDO dizer "Não há informações", "Não foram fornecidas informações" ou "Desconhecido". Se o lote tiver poucas informações, NUNCA foque no que falta.
+    3. Se faltarem dados do Pai, Mãe ou Prenhez, SIMPLESMENTE OMITE ESSES TÓPICOS.
+    4. Quando houver pouca informação, crie uma "APRESENTAÇÃO DO LOTE" exaltando fortemente a raça, idade, peso e a categoria do animal. Transforme o pouco que tem em um argumento de venda valorizado.
+    5. Seja ULTRA-DIRETO (máximo 1 a 2 frases curtas por item).
 
-    Siga ESTRITAMENTE este modelo:
+    MOLDE DE RESPOSTA (Use apenas os tópicos que tiverem dados reais para exaltar):
 
     📌 **APRESENTAÇÃO DO LOTE**
-    [Resumo direto do animal, categoria, peso e oferta em 1 frase].
+    [Venda agressiva exaltando os pontos fortes do animal, idade, categoria e a oportunidade].
 
     🐂 **GENÉTICA DO PAI**
-    [Nome do pai e raçadores de destaque na linha paterna em 1 frase].
+    [APENAS SE HOUVER DADOS: Linhagem paterna em 1 frase].
 
     🐄 **GENÉTICA DA MÃE**
-    [Nome da mãe e matrizes/linhagem materna em 1 frase].
+    [APENAS SE HOUVER DADOS: Linhagem materna em 1 frase].
 
-    💉 **GENÉTICA DA REPRODUÇÃO / PRENHEZ**
-    [Status do acasalamento, touro acasalado e previsão em 1 frase].
+    💉 **REPRODUÇÃO / PRENHEZ**
+    [APENAS SE HOUVER DADOS: Status reprodutivo em 1 frase].
     """
 
     parts = [{"text": prompt_text}]
@@ -231,7 +232,7 @@ def gerar_gatilhos_ia_especificos(num_lote, dados_lote, texto_pagina_cat, api_ke
 
     Gere EXATAMENTE 3 a 4 GATILHOS DE CANTA ULTRA-ESPECÍFICOS e DESENHADOS para este animal.
     Regras:
-    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso, genealogia ou a mãe se existirem).
+    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso, genealogia ou a mãe se existirem). Se não existirem, exalte a categoria (ex: "Matriz espetacular!").
     - Frases curtas, chamativas e de alto impacto para gritar no microfone (máximo 8 a 10 palavras por gatilho).
     - NÃO use saudações, números, introduções ou marcadores genéricos.
     - Separe cada gatilho em uma nova linha.
