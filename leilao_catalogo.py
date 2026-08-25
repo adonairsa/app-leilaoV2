@@ -212,7 +212,50 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
 
     return f"⚠️ Erro na resposta da API: {ultimo_erro}"
 
-def gerar_gatilhos(dados_lote):
+@st.cache_data(show_spinner=False)
+def gerar_gatilhos_ia_especificos(num_lote, dados_lote, texto_pagina_cat, api_key):
+    if not api_key or not dados_lote:
+        return []
+
+    api_key_clean = api_key.strip()
+    headers = {"Content-Type": "application/json"}
+
+    prompt_text = f"""
+    Você é um leiloeiro de elite puxando lances de pista rápido no microfone.
+    Analise os dados deste LOTE {num_lote}:
+    - Produto/Nome: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
+    - Reprodução: {dados_lote.get('info_reproducao', 'N/A')}
+    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} | {dados_lote.get('peso', 'N/A')} | {dados_lote.get('idade', 'N/A')}
+    - Texto Catálogo: {texto_pagina_cat[:600] if texto_pagina_cat else ''}
+
+    Gere EXATAMENTE 3 a 4 GATILHOS DE CANTA ULTRA-ESPECÍFICOS e DESENHADOS para este animal.
+    Regras:
+    - Use dados reais do animal (cite o touro acasalado, a porcentagem ofertada, o peso, genealogia ou a mãe se existirem).
+    - Frases curtas, chamativas e de alto impacto para gritar no microfone (máximo 8 a 10 palavras por gatilho).
+    - NÃO use saudações, números, introduções ou marcadores genéricos.
+    - Separe cada gatilho em uma nova linha.
+    """
+
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
+
+    for mod in modelos:
+        for ver in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                res_json = response.json()
+                if response.status_code == 200 and 'candidates' in res_json:
+                    text = res_json['candidates'][0]['content']['parts'][0]['text']
+                    linhas = [l.strip('- *123.').strip() for l in text.split('\n') if l.strip()]
+                    return linhas[:4]
+            except:
+                pass
+
+    return []
+
+def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
     if not dados_lote:
         return ["ANIMAL SELECIONADO!", "QUALIDADE GARANTIDA!", "OPORTUNIDADE NA PISTA!"]
@@ -242,6 +285,17 @@ def run():
         .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
+        .gatilho-ia-card {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+            color: white !important;
+            padding: 16px;
+            border-radius: 14px;
+            font-size: 19px !important;
+            margin: 8px 0;
+            font-weight: bold !important;
+            border-left: 6px solid #34D399;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; }
     </style>
     """
@@ -335,8 +389,16 @@ def run():
             with c3:
                 st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd","-")}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor","-")}</div>', unsafe_allow_html=True)
 
+        # 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA) - COLOCADOS ACIMA DOS GATILHOS DO MICROFONE
+        with st.spinner("⚡ IA desenhando gatilhos de canta para o lote..."):
+            gatilhos_ia = gerar_gatilhos_ia_especificos(num_lote, dados_lote, texto_pagina_catalogo, api_key)
+            if gatilhos_ia:
+                st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
+                for gat in gatilhos_ia:
+                    st.markdown(f'<div class="gatilho-ia-card">🔥 {gat}</div>', unsafe_allow_html=True)
+
         st.markdown("### 🎙️ GATILHOS PARA O MICROFONE")
-        gatilhos = gerar_gatilhos(dados_lote)
+        gatilhos = gerar_gatilhos_padrao(dados_lote)
         for g in gatilhos:
             st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
 
