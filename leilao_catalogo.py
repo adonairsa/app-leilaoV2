@@ -11,19 +11,19 @@ def obter_api_keys():
     chaves = []
     try:
         if "GEMINI_API_KEYS" in st.secrets:
-            raw_keys = st.secrets["GEMINI_API_KEYS"]
-            chaves = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            raw_keys = str(st.secrets["GEMINI_API_KEYS"])
+            chaves = [k.strip().strip('"').strip("'") for k in raw_keys.split(",") if k.strip()]
         elif "GEMINI_API_KEY" in st.secrets:
-            chaves = [st.secrets["GEMINI_API_KEY"].strip()]
+            chaves = [str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")]
     except:
         pass
         
     if not chaves:
-        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY")
+        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
         if env_keys:
-            chaves = [k.strip() for k in env_keys.split(",") if k.strip()]
+            chaves = [k.strip().strip('"').strip("'") for k in env_keys.split(",") if k.strip()]
             
-    return chaves if chaves else [""]
+    return chaves
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -197,7 +197,7 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
 
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_keys):
-    if not api_keys or api_keys[0] == "":
+    if not api_keys:
         return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
 
     headers = {"Content-Type": "application/json"}
@@ -246,50 +246,38 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
 
     payload = {"contents": [{"parts": parts}]}
     modelos = ["gemini-1.5-flash", "gemini-1.5-pro"]
-    ultimo_erro = ""
+    erros = []
 
     for mod in modelos:
-        for tentativa in range(2): 
-            for api_key in api_keys:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
-                try:
-                    response = requests.post(url, headers=headers, json=payload, timeout=25)
-                    res_json = response.json()
-                    
-                    if response.status_code == 200 and 'candidates' in res_json:
-                        resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
-                        if "---GATILHOS---" in resposta_completa:
-                            partes = resposta_completa.split("---GATILHOS---")
-                            consideracoes = partes[0].strip()
-                            gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
-                            return consideracoes, gatilhos_limpos[:4]
-                        else:
-                            return resposta_completa.strip(), []
-                            
-                    elif response.status_code == 429:
-                        ultimo_erro = "Cota limite alcançada."
-                        continue
-                        
-                    elif response.status_code == 404:
-                        ultimo_erro = f"Modelo {mod} indisponível."
-                        break
-                        
+        for api_key in api_keys:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                res_json = response.json()
+                
+                if response.status_code == 200 and 'candidates' in res_json:
+                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                    if "---GATILHOS---" in resposta_completa:
+                        partes = resposta_completa.split("---GATILHOS---")
+                        consideracoes = partes[0].strip()
+                        gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
+                        return consideracoes, gatilhos_limpos[:4]
                     else:
-                        ultimo_erro = res_json.get('error', {}).get('message', response.text)
-                        continue
-                        
-                except Exception as e:
-                    ultimo_erro = str(e)
+                        return resposta_completa.strip(), []
+                
+                msg_erro = res_json.get('error', {}).get('message', response.text)
+                erros.append(f"[{mod}]: {msg_erro}")
+
+                if response.status_code == 429:
+                    time.sleep(1)
                     continue
+                    
+            except Exception as e:
+                erros.append(f"[{mod}]: {str(e)}")
+                continue
 
-            if "Cota" in ultimo_erro:
-                time.sleep(5)
-            elif "indisponível" in ultimo_erro:
-                break
-            else:
-                break
-
-    return f"⚠️ Erro de Conexão ou Limite Atingido. Detalhe: {ultimo_erro}", []
+    detalhe_erro = erros[-1] if erros else "Erro desconhecido"
+    return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
