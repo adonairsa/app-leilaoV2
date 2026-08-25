@@ -93,31 +93,24 @@ css_code = """
         margin: 6px 0;
         font-weight: bold;
     }
-    .catalogo-preview {
-        border: 2px solid #F59E0B;
-        border-radius: 12px;
-        padding: 10px;
-        margin: 10px 0;
-    }
-    .status-box {
+    .debug-box {
+        background: #0F172A;
+        color: #94A3B8;
         padding: 10px;
         border-radius: 8px;
+        font-size: 12px;
         margin: 5px 0;
-        font-size: 14px;
-    }
-    .status-ok {
-        background: #065F46;
-        color: #6EE7B7;
+        max-height: 200px;
+        overflow-y: auto;
     }
 </style>
 """
 st.markdown(css_code, unsafe_allow_html=True)
 
-# ==================== OBTÉM API KEYS ====================
+# ==================== API KEYS ====================
 def obter_api_keys():
     ds_keys = []
     ant_keys = []
-    
     try:
         if "DEEPSEEK_API_KEY" in st.secrets:
             ds_keys.append(st.secrets["DEEPSEEK_API_KEY"])
@@ -125,7 +118,6 @@ def obter_api_keys():
             ant_keys.append(st.secrets["ANTHROPIC_API_KEY"])
     except:
         pass
-    
     return ds_keys, ant_keys
 
 # ==================== PROCESSAMENTO DE PDF ====================
@@ -150,20 +142,20 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina):
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             if 0 <= num_pagina < len(pdf.pages):
-                img = pdf.pages[num_pagina].to_image(resolution=100).original
+                img = pdf.pages[num_pagina].to_image(resolution=80).original
                 buffer = BytesIO()
-                img.save(buffer, format="JPEG", quality=70)
+                img.save(buffer, format="JPEG", quality=50)
                 return buffer.getvalue()
     except:
         return None
     return None
 
-# ==================== AUTO-DETECÇÃO DA PÁGINA DO CATÁLOGO ====================
+# ==================== DETECÇÃO AGRESSIVA DA PÁGINA ====================
 @st.cache_data
-def encontrar_pagina_catalogo_auto(texto_cat_tuple, num_lote, dados_lote):
+def encontrar_pagina_catalogo_agressivo(texto_cat_tuple, num_lote, dados_lote):
     """
-    Detecta automaticamente a página correta do catálogo
-    Usa MÚLTIPLAS estratégias para encontrar o lote certo
+    Estratégia AGRESSIVA para encontrar a página do catálogo
+    Tenta TODOS os padrões possíveis
     """
     texto_cat = list(texto_cat_tuple)
     
@@ -172,54 +164,82 @@ def encontrar_pagina_catalogo_auto(texto_cat_tuple, num_lote, dados_lote):
     
     num_clean = re.sub(r"\D", "", str(num_lote or ""))
     nome_animal = dados_lote.get("nome_animal", "") or dados_lote.get("produto", "")
+    categoria = dados_lote.get("categoria", "")
     
-    # ESTRATÉGIA 1: Procura "LOTE XX" exato
+    st.sidebar.markdown("### 🔍 DEBUG DETECÇÃO")
+    st.sidebar.text(f"Lote: {num_lote}")
+    st.sidebar.text(f"Nome: {nome_animal[:50]}")
+    st.sidebar.text(f"Categoria: {categoria}")
+    st.sidebar.text(f"Total páginas catálogo: {len(texto_cat)}")
+    
+    resultados = []
+    
+    # ESTRATÉGIA 1: "LOTE XX" exato
     if num_clean:
         n_int = int(num_clean)
         patterns = [
-            rf"\bLOTE\s*0*{n_int}\b",
-            rf"\bLT\s*0*{n_int}\b",
+            rf"LOTE\s*0*{n_int}",
+            rf"LT\s*0*{n_int}",
+            rf"LOTE\s*N[º°]?\s*0*{n_int}",
         ]
         
         for pattern in patterns:
             for idx, pagina in enumerate(texto_cat):
                 if pagina and re.search(pattern, pagina, re.IGNORECASE):
-                    return idx, pagina
+                    resultados.append((100, idx, pagina, f"LOTE exato: {pattern}"))
     
-    # ESTRATÉGIA 2: Procura pelo nome do animal
+    # ESTRATÉGIA 2: Nome do animal em MAIÚSCULAS
     if nome_animal:
+        # Remove palavras comuns
         ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA",
                        "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LOTE",
-                       "VIRTUAL", "PROMETIDA", "TERRA"}
+                       "VIRTUAL", "PROMETIDA", "TERRA", "NELORE", "ANGUS"}
         
-        palavras = [p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{4,}\b", nome_animal)
+        palavras = [p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{3,}\b", nome_animal)
                    if p.upper() not in ignore_words]
         
         if palavras:
-            melhores = []
             for idx, pagina in enumerate(texto_cat):
                 if pagina:
                     pag_upper = pagina.upper()
                     matches = sum(1 for p in palavras if p in pag_upper)
                     if matches > 0:
-                        melhores.append((matches, idx, pagina))
-            
-            if melhores:
-                melhores.sort(key=lambda x: x[0], reverse=True)
-                return melhores[0][1], melhores[0][2]
+                        score = matches * 20
+                        resultados.append((score, idx, pagina, f"Nome match: {matches} palavras"))
     
-    # ESTRATÉGIA 3: Procura número do lote isolado
+    # ESTRATÉGIA 3: Número do lote isolado
     if num_clean:
         pattern = rf"\b{int(num_clean)}\b"
         for idx, pagina in enumerate(texto_cat):
             if pagina and re.search(pattern, pagina):
-                # Verifica se não é a O.E. (procura por cabeçalhos de O.E.)
+                # Verifica se NÃO é O.E.
                 if not re.search(r"QTD\s+IDADE\s+PESO", pagina, re.IGNORECASE):
-                    return idx, pagina
+                    resultados.append((50, idx, pagina, "Número isolado"))
     
+    # ESTRATÉGIA 4: Categoria do animal
+    if categoria:
+        cat_upper = categoria.upper()
+        for idx, pagina in enumerate(texto_cat):
+            if pagina and cat_upper in pagina.upper():
+                resultados.append((30, idx, pagina, f"Categoria: {categoria}"))
+    
+    # Ordena por score
+    if resultados:
+        resultados.sort(key=lambda x: x[0], reverse=True)
+        melhor = resultados[0]
+        st.sidebar.success(f"✅ Página {melhor[1] + 1} - {melhor[3]}")
+        return melhor[1], melhor[2]
+    
+    # FALLBACK: Se não encontrou, usa a primeira página que não é O.E.
+    for idx, pagina in enumerate(texto_cat):
+        if pagina and not re.search(r"QTD\s+IDADE\s+PESO", pagina, re.IGNORECASE):
+            st.sidebar.warning(f"⚠️ Fallback: usando página {idx + 1}")
+            return idx, pagina
+    
+    st.sidebar.error("❌ Nenhuma página encontrada")
     return -1, ""
 
-# ==================== EXTRAÇÃO DA O.E. ====================
+# ==================== EXTRAÇÃO O.E. ====================
 @st.cache_data(ttl=7200, show_spinner=False)
 def extrair_dados_oe_pdf(file_bytes):
     sequencia = []
@@ -333,13 +353,13 @@ def extrair_dados_oe_pdf(file_bytes):
                             dados_por_lote[lt_num] = dados
     
     except Exception as e:
-        st.error(f"Erro ao extrair O.E.: {str(e)}")
+        st.error(f"Erro O.E.: {str(e)}")
     
     return sequencia, dados_por_lote
 
-# ==================== OCR COM CLAUDE (SÓ CATÁLOGO) ====================
-def extrair_texto_imagem_claude(img_bytes, ant_keys):
-    """Claude lê APENAS a imagem do CATÁLOGO"""
+# ==================== CLAUDE LÊ CATÁLOGO ====================
+def claude_ler_catalogo(img_bytes, ant_keys):
+    """Claude lê a imagem do CATÁLOGO"""
     if not img_bytes or not ant_keys:
         return ""
     
@@ -362,18 +382,7 @@ def extrair_texto_imagem_claude(img_bytes, ant_keys):
                 },
                 {
                     "type": "text",
-                    "text": """Esta é uma página do CATÁLOGO do leilão.
-                    Transcreva TODO o texto visível:
-                    - Nome do animal
-                    - Número do lote
-                    - Raça/Espécie
-                    - Categoria
-                    - Pelagem
-                    - Pai, Mãe, Avôs (genealogia)
-                    - Vendedor
-                    - Observações
-                    
-                    Formato: Texto simples."""
+                    "text": "Transcreva TODO o texto desta página do catálogo do leilão. Inclua nome do animal, lote, raça, categoria, pelagem, genealogia (pai, mãe, avôs), vendedor e observações."
                 }
             ]
         }]
@@ -393,46 +402,39 @@ def extrair_texto_imagem_claude(img_bytes, ant_keys):
             if response.status_code == 200 and 'content' in res_json:
                 txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
                 return "\n".join(txt_parts)
-                
-        except:
+            else:
+                st.sidebar.error(f"Claude erro: {res_json.get('error', {}).get('message', '')}")
+        except Exception as e:
+            st.sidebar.error(f"Claude conexão: {str(e)}")
             continue
     
     return ""
 
-# ==================== ANÁLISE COM DEEPSEEK ====================
-def analisar_com_deepseek(num_lote, dados_lote, texto_catalogo_pdf, texto_ocr_claude, ds_keys):
-    """DeepSeek analisa e gera resposta final"""
+# ==================== DEEPSEEK ANALISA ====================
+def deepseek_analisar(num_lote, dados_lote, texto_catalogo, ds_keys):
     if not ds_keys:
-        return None, "Configure DEEPSEEK_API_KEY"
+        return None, "Sem DeepSeek"
     
-    prompt_system = """Você é um Leiloeiro Rural de Elite.
-    Analise os dados e crie uma apresentação perfeita.
+    prompt = f"""
+    LOTE: {num_lote}
     
-    Retorne JSON:
-    {
+    DADOS ORDEM:
+    {dados_lote.get('linha_completa', '')}
+    
+    CATÁLOGO:
+    {texto_catalogo[:3000]}
+    
+    Crie JSON:
+    {{
         "nome_animal": "...",
         "especie_emoji": "🐴/🐂/🐄/🫏",
-        "encartes": [{"titulo": "...", "valor": "..."}],
+        "encartes": [{{"titulo": "...", "valor": "..."}}],
         "apresentacao": "...",
         "genetica_pai": "...",
         "genetica_mae": "...",
         "reproducao": "...",
         "gatilhos": ["...", "...", "..."]
-    }"""
-    
-    prompt_user = f"""
-    LOTE: {num_lote}
-    
-    DADOS DA ORDEM:
-    {dados_lote.get('linha_completa', '')}
-    
-    TEXTO DO CATÁLOGO (OCR CLAUDE):
-    {texto_ocr_claude[:2000]}
-    
-    TEXTO DO CATÁLOGO (PDF):
-    {texto_catalogo_pdf[:2000]}
-    
-    Analise e retorne JSON.
+    }}
     """
     
     url = "https://api.deepseek.com/chat/completions"
@@ -445,10 +447,7 @@ def analisar_com_deepseek(num_lote, dados_lote, texto_catalogo_pdf, texto_ocr_cl
         
         payload = {
             "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user}
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "temperature": 0.3
         }
@@ -458,44 +457,30 @@ def analisar_com_deepseek(num_lote, dados_lote, texto_catalogo_pdf, texto_ocr_cl
             res_json = response.json()
             
             if response.status_code == 200 and 'choices' in res_json:
-                content = res_json['choices'][0]['message']['content']
-                return json.loads(content), ""
-            else:
-                return None, res_json.get('error', {}).get('message', 'Erro')
-                
-        except Exception as e:
-            return None, str(e)
+                return json.loads(res_json['choices'][0]['message']['content']), ""
+        except:
+            continue
     
-    return None, "Nenhuma chave funcionou"
+    return None, "Erro DeepSeek"
 
-# ==================== INTERFACE PRINCIPAL ====================
+# ==================== MAIN ====================
 def run():
     ds_keys, ant_keys = obter_api_keys()
     
-    # Sidebar
     with st.sidebar:
         st.header("📂 Arquivos")
         file_oe = st.file_uploader("Ordem de Entrada (PDF)", type="pdf", key="oe")
-        file_cat = st.file_uploader("Catálogo do Leilão (PDF)", type="pdf", key="cat")
+        file_cat = st.file_uploader("Catálogo (PDF)", type="pdf", key="cat")
         
         st.markdown("---")
         modo_ordenacao = st.radio("Ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0)
-        
-        st.markdown("---")
-        st.markdown("**Status APIs:**")
-        if ds_keys:
-            st.markdown('✅ DeepSeek OK', unsafe_allow_html=True)
-        if ant_keys:
-            st.markdown('✅ Claude OK', unsafe_allow_html=True)
     
-    # Processa arquivos
     file_bytes_oe = file_oe.getvalue() if file_oe else None
     file_bytes_cat = file_cat.getvalue() if file_cat else None
     
     texto_cat = processar_pdf(file_bytes_cat)
     sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes_oe)
     
-    # Lista de lotes
     if sequencia_oe:
         if modo_ordenacao == "ORDEM NUMÉRICA":
             lista_lotes = sorted(sequencia_oe, key=lambda x: int(re.sub(r"\D", "", x)))
@@ -505,7 +490,7 @@ def run():
         lista_lotes = []
     
     if not lista_lotes:
-        st.warning("Carregue a Ordem de Entrada!")
+        st.warning("Carregue a O.E.!")
         st.stop()
     
     if 'lote_idx' not in st.session_state:
@@ -514,7 +499,6 @@ def run():
     if st.session_state.lote_idx >= len(lista_lotes):
         st.session_state.lote_idx = 0
     
-    # Navegação
     st.markdown(f'<div class="ordem-indicador">{modo_ordenacao} | Lote {st.session_state.lote_idx + 1} de {len(lista_lotes)}</div>', unsafe_allow_html=True)
     
     col_prev, col_next = st.columns(2)
@@ -532,26 +516,20 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx]
     dados_lote = mapa_oe.get(num_lote, {})
     
-    # AUTO-DETECÇÃO (SEM OPÇÃO MANUAL)
+    # DETECÇÃO AGRESSIVA
     pagina_detectada = -1
-    texto_pagina_catalogo = ""
+    texto_pagina = ""
     
     if texto_cat and file_bytes_cat:
-        pagina_detectada, texto_pagina_catalogo = encontrar_pagina_catalogo_auto(
+        pagina_detectada, texto_pagina = encontrar_pagina_catalogo_agressivo(
             tuple(texto_cat), num_lote, dados_lote
         )
-        
-        if pagina_detectada >= 0:
-            st.success(f"📖 Catálogo: Página {pagina_detectada + 1} (auto-detectada)")
-        else:
-            st.warning("⚠️ Página do catálogo não encontrada automaticamente")
     
-    # Imagem da página detectada
-    img_pagina_bytes = None
+    # Imagem da página
+    img_bytes = None
     if pagina_detectada >= 0 and file_bytes_cat:
-        img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada)
+        img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada)
     
-    # Layout
     col_esq, col_dir = st.columns([1, 1])
     
     with col_esq:
@@ -563,16 +541,18 @@ def run():
         if dados_lote.get("info_reproducao"):
             st.markdown(f'<div class="banner-reproducao">{dados_lote["info_reproducao"]}</div>', unsafe_allow_html=True)
         
-        # Processa IA
-        with st.spinner("🤖 Analisando catálogo..."):
-            texto_ocr_claude = ""
-            if img_pagina_bytes and ant_keys:
-                texto_ocr_claude = extrair_texto_imagem_claude(img_pagina_bytes, ant_keys)
+        with st.spinner("🤖 Claude lendo catálogo..."):
+            texto_ocr = ""
+            if img_bytes and ant_keys:
+                texto_ocr = claude_ler_catalogo(img_bytes, ant_keys)
+                
+                if texto_ocr:
+                    st.success(f"✅ Claude leu a página {pagina_detectada + 1}")
+                else:
+                    st.error("❌ Claude não conseguiu ler")
             
-            if ds_keys and texto_ocr_claude:
-                dados_ia, erro = analisar_com_deepseek(
-                    num_lote, dados_lote, texto_pagina_catalogo, texto_ocr_claude, ds_keys
-                )
+            if texto_ocr and ds_keys:
+                dados_ia, erro = deepseek_analisar(num_lote, dados_lote, texto_ocr, ds_keys)
                 
                 if dados_ia:
                     for enc in dados_ia.get("encartes", []):
@@ -584,15 +564,13 @@ def run():
                         st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
     
     with col_dir:
-        # Mostra imagem do CATÁLOGO (nunca da O.E.)
-        if img_pagina_bytes:
-            st.markdown(f'<div class="catalogo-preview">📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}</div>', unsafe_allow_html=True)
-            st.image(img_pagina_bytes, use_container_width=True)
+        if img_bytes:
+            st.markdown(f"**📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}**")
+            st.image(img_bytes, use_container_width=True)
         
-        # Texto OCR
-        if texto_ocr_claude:
-            with st.expander("📖 Texto transcrito pelo Claude"):
-                st.text(texto_ocr_claude[:2000])
+        if texto_ocr:
+            with st.expander("📖 Texto Claude"):
+                st.text(texto_ocr[:1500])
 
 if __name__ == "__main__":
     run()
