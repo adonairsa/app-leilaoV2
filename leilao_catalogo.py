@@ -188,19 +188,24 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
     payload = {"contents": [{"parts": parts}]}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_clean}"
+    
+    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
+    ultimo_erro = ""
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=25)
-        res_json = response.json()
+    for mod in modelos:
+        for ver in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                res_json = response.json()
+                if response.status_code == 200 and 'candidates' in res_json:
+                    return res_json['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    ultimo_erro = res_json.get('error', {}).get('message', response.text)
+            except Exception as e:
+                ultimo_erro = str(e)
 
-        if response.status_code == 200 and 'candidates' in res_json:
-            return res_json['candidates'][0]['content']['parts'][0]['text']
-        else:
-            erro_msg = res_json.get('error', {}).get('message', response.text)
-            return f"⚠️ Erro da API Google ({response.status_code}): {erro_msg}"
-    except Exception as e:
-        return f"⚠️ Erro de Conexão: {str(e)}"
+    return f"⚠️ Erro na resposta da API: {ultimo_erro}"
 
 def gerar_gatilhos(dados_lote):
     gatilhos = []
