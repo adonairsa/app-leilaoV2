@@ -151,77 +151,56 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
 @st.cache_data(show_spinner=False)
 def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
     if not api_key:
-        return "⚠️ GEMINI_API_KEY não encontrada nos Secrets."
+        return "⚠️ Insira a GEMINI_API_KEY nos Secrets do Streamlit."
+
+    api_key_clean = api_key.strip()
+    headers = {"Content-Type": "application/json"}
 
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio.
-    Analise a imagem da folha do LOTE {num_lote} no catálogo, o texto impresso do catálogo e a Ordem de Entrada.
-
-    DADOS DO LOTE:
-    - Lote: {num_lote}
-    - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    Analise o LOTE {num_lote}:
+    - Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
     - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
     - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
-    - Categoria / Peso / Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
+    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
 
-    TEXTO EXTRAÍDO DO CATÁLOGO:
-    {texto_pagina_cat[:1200] if texto_pagina_cat else "Consulte a imagem do catálogo."}
+    TEXTO DO CATÁLOGO:
+    {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
 
-    Gere uma análise técnica ESTRUTURADA E COMERCIAL para leitura rápida do leiloeiro no microfone:
+    Gere uma análise técnica ESTRUTURADA E COMERCIAL para o microfone:
 
     📌 **APRESENTAÇÃO DO LOTE**
     [Apresentação do animal, categoria, peso/idade e porcentagem de venda].
 
     🐂 **GENÉTICA DO PAI**
-    [Nome do pai + principais raçadores/linhagens consagradas e campeãs presentes na linha paterna].
+    [Nome do pai + principais raçadores/linhagens consagradas na linha paterna].
 
-    🐄 **GENÉTICA DA MÃE**
-    [Nome da mãe + principais raçadores/matrizes consagradas e campeãs presentes na linha materna].
+    com **GENÉTICA DA MÃE**
+    [Nome da mãe + principais raçadores/matrizes consagradas na linha materna].
 
     💉 **GENÉTICA DA REPRODUÇÃO / PRENHEZ**
-    [Detalhes do acasalamento: nome do touro da inseminação/prenhez/parto, linhagem dele, previsão e valor do ventre].
+    [Detalhes do acasalamento: nome do touro da inseminação/prenhez/parto e valor do ventre].
     """
 
-    api_key_clean = api_key.strip()
-    headers = {"Content-Type": "application/json"}
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro"]
-
+    parts = [{"text": prompt_text}]
     if img_bytes:
         base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        payload_img = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt_text},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
-                ]
-            }]
-        }
-        for ver in ["v1beta", "v1"]:
-            for mod in modelos:
-                try:
-                    url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-                    response = requests.post(url, headers=headers, json=payload_img, timeout=20)
-                    if response.status_code == 200:
-                        res_json = response.json()
-                        if 'candidates' in res_json and res_json['candidates']:
-                            return res_json['candidates'][0]['content']['parts'][0]['text']
-                except:
-                    pass
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
-    payload_txt = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    for ver in ["v1beta", "v1"]:
-        for mod in modelos:
-            try:
-                url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-                response = requests.post(url, headers=headers, json=payload_txt, timeout=20)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    if 'candidates' in res_json and res_json['candidates']:
-                        return res_json['candidates'][0]['content']['parts'][0]['text']
-            except:
-                pass
+    payload = {"contents": [{"parts": parts}]}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_clean}"
 
-    return "Análise temporariamente indisponível. Verifique se a chave cadastrada nos Secrets está ativa."
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=25)
+        res_json = response.json()
+
+        if response.status_code == 200 and 'candidates' in res_json:
+            return res_json['candidates'][0]['content']['parts'][0]['text']
+        else:
+            erro_msg = res_json.get('error', {}).get('message', response.text)
+            return f"⚠️ Erro da API Google ({response.status_code}): {erro_msg}"
+    except Exception as e:
+        return f"⚠️ Erro de Conexão: {str(e)}"
 
 def gerar_gatilhos(dados_lote):
     gatilhos = []
