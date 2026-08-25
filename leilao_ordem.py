@@ -372,8 +372,17 @@ def run():
             st.session_state.lote_idx_oe = min(len(lista_lotes) - 1, st.session_state.lote_idx_oe + 1)
             st.rerun()
 
-    lote_selecionado = st.selectbox("Ir para o lote:", options=lista_lotes, index=st.session_state.lote_idx_oe, key="sel_oe")
-    st.session_state.lote_idx_oe = lista_lotes.index(lote_selecionado)
+    def ao_mudar_lote_ordem():
+        if "sel_oe_widget" in st.session_state and st.session_state.sel_oe_widget in lista_lotes:
+            st.session_state.lote_idx_oe = lista_lotes.index(st.session_state.sel_oe_widget)
+
+    st.selectbox(
+        "Ir para o lote:",
+        options=lista_lotes,
+        index=st.session_state.lote_idx_oe,
+        key="sel_oe_widget",
+        on_change=ao_mudar_lote_ordem
+    )
 
     num_lote = lista_lotes[st.session_state.lote_idx_oe]
     dados_lote = mapa_oe.get(num_lote, {})
@@ -402,7 +411,7 @@ def run():
                     st.markdown(f'<div class="banner-inseminacao">💉 {dados_ia["status_reproducao"]}</div>', unsafe_allow_html=True)
 
             if dados_ia.get("nome_animal"):
-                st.markdown(f'<div class="nome-animal-box">🐂 {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="nome-animal-box">bull {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
             encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
@@ -456,5 +465,4 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-    # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
     precarregar_proximos_lotes(st.session_state.lote_idx_oe, lista_lotes, mapa_oe, api_keys)
