@@ -48,7 +48,7 @@ def normalizar_lote(valor):
 def hash_bytes(b):
     return hashlib.md5(b).hexdigest() if b else ""
 
-# ==================== PROCESSAMENTO DE O.E. ====================
+# ==================== PROCESSAMENTO DA O.E. ====================
 @st.cache_data(ttl=7200, show_spinner=False)
 def extrair_ordem_entrada_fast(file_bytes):
     sequencia = []
