@@ -5,35 +5,162 @@ import os
 import requests
 import json
 import time
+import base64
 import concurrent.futures
 from io import BytesIO
 
 def obter_api_keys():
-    chaves_brutas = []
+    chaves_deepseek = []
+    chaves_anthropic = []
+    
     try:
         for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
             if secret_name in st.secrets:
                 val = st.secrets[secret_name]
-                if isinstance(val, (list, tuple)):
-                    chaves_brutas.extend(val)
-                elif isinstance(val, str):
-                    chaves_brutas.extend(val.split(","))
+                if isinstance(val, (list, tuple)): chaves_deepseek.extend(val)
+                elif isinstance(val, str): chaves_deepseek.extend(val.split(","))
+                
+        for secret_name in ["ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]:
+            if secret_name in st.secrets:
+                val = st.secrets[secret_name]
+                if isinstance(val, (list, tuple)): chaves_anthropic.extend(val)
+                elif isinstance(val, str): chaves_anthropic.extend(val.split(","))
     except Exception:
         pass
 
-    if not chaves_brutas:
+    if not chaves_deepseek:
         env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
-        if env_val:
-            chaves_brutas.extend(env_val.split(","))
+        if env_val: chaves_deepseek.extend(env_val.split(","))
 
-    chaves_limpas = []
-    for item in chaves_brutas:
-        s = str(item).strip()
-        s_clean = re.sub(r"[\[\]'\" \n\r\t]", "", s)
-        if s_clean and s_clean not in chaves_limpas:
-            chaves_limpas.append(s_clean)
+    if not chaves_anthropic:
+        env_val = os.environ.get("ANTHROPIC_API_KEYS") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY") or ""
+        if env_val: chaves_anthropic.extend(env_val.split(","))
 
-    return chaves_limpas
+    clean_ds = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_deepseek if str(x).strip()]
+    clean_ant = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_anthropic if str(x).strip()]
+
+    return clean_ds, clean_ant
+
+@st.cache_data(ttl=7200, show_spinner=False)
+def processar_pdf(file_bytes):
+    paginas = []
+    if not file_bytes:
+        return paginas
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                texto = page.extract_text(layout=True) or page.extract_text() or ""
+                paginas.append(texto)
+    except Exception as e:
+        st.error(f"Erro ao processar texto do PDF: {str(e)}")
+    return paginas
+
+@st.cache_data(show_spinner=False)
+def obter_total_paginas_pdf(file_bytes):
+    if not file_bytes:
+        return 0
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            return len(pdf.pages)
+    except:
+        return 0
+
+@st.cache_data(show_spinner=False)
+def obter_imagem_bytes_pagina(file_bytes, num_pagina):
+    if not file_bytes or num_pagina < 0:
+        return None
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            if 0 <= num_pagina < len(pdf.pages):
+                img = pdf.pages[num_pagina].to_image(resolution=150).original
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG")
+                return buffer.getvalue()
+    except Exception as e:
+        st.warning(f"Não foi possível renderizar imagem da página {num_pagina + 1}: {str(e)}")
+        return None
+    return None
+
+@st.cache_data(show_spinner=False)
+def extrair_texto_imagem_claude(img_bytes, ant_keys):
+    if not img_bytes or not ant_keys:
+        return ""
+
+    base64_image = base64.b64encode(img_bytes).decode('utf-8')
+    url = "https://api.anthropic.com/v1/messages"
+
+    payload = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 1000,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Transcreva todo o texto da página deste catálogo de leilão: nome do animal, número do lote, categoria, pelagem, data de nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações."
+                }
+            ]
+        }]
+    }
+
+    for api_key in ant_keys:
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
+            res_json = response.json()
+            if response.status_code == 200 and 'content' in res_json:
+                return res_json['content'][0]['text']
+        except Exception:
+            continue
+
+    return ""
+
+@st.cache_data
+def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
+    texto_cat = list(texto_cat_tuple)
+    if not texto_cat:
+        return -1, ""
+
+    num_clean = re.sub(r"\D", "", str(num_lote or ""))
+
+    if num_clean:
+        n_int = int(num_clean)
+        padroes = [
+            rf"\b(?:LOTE|LT|L|Nº|NUMERO)[\s:\.\-]*0*{n_int}\b",
+            rf"\bLOTE\s*0*{n_int}\b"
+        ]
+        for pattern in padroes:
+            for idx, pagina in enumerate(texto_cat):
+                if pagina and re.search(pattern, pagina, re.IGNORECASE):
+                    return idx, pagina
+
+    if nome_animal:
+        ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILÕES", "LOTE"}
+        palavras = [
+            p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{4,}\b", nome_animal)
+            if p.upper() not in ignore_words
+        ]
+        
+        if palavras:
+            for idx, pagina in enumerate(texto_cat):
+                if pagina:
+                    pag_upper = pagina.upper()
+                    if any(p in pag_upper for p in palavras):
+                        return idx, pagina
+
+    return -1, ""
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def extrair_dados_oe_pdf(file_bytes):
@@ -216,26 +343,34 @@ def extrair_dados_oe_pdf(file_bytes):
     return sequencia, dados_por_lote
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
-    if not api_keys:
+def analisar_lote_catalogo_hybrid(num_lote, dados_lote, texto_pagina_cat, img_pagina_bytes, ds_keys, ant_keys):
+    texto_claude_ocr = ""
+    if ant_keys and img_pagina_bytes:
+        texto_claude_ocr = extrair_texto_imagem_claude(img_pagina_bytes, ant_keys)
+
+    texto_final_cat = f"--- OCR DO CLAUDE (IMAGEM DA PÁGINA) ---\n{texto_claude_ocr}\n\n--- TEXTO EXTRAÍDO DO PDF ---\n{texto_pagina_cat}"
+
+    if not ds_keys:
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler a associação exata entre o Cabeçalho da Tabela do PDF e os dados do Lote para organizar os encartes visuais da tela e a canta da pista."""
+    Sua missão é ler as informações da Ordem de Entrada e da Transcrição do Catálogo de um Lote e organizar a canta e encartes visuais."""
 
     prompt_user = f"""
-    Analise os dados rotulados do LOTE {num_lote}:
-
-    📍 LINHA DA ORDEM COM CABEÇALHO ASSOCIADO (CHAVE: VALOR):
+    Analise o LOTE {num_lote}:
+    📍 DADOS DA ORDEM ROTULADOS:
     {dados_lote.get('linha_contextualizada', dados_lote.get('linha_completa', ''))}
 
-    INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
-    1. Crie a lista de "ENCARTES" (cartões visuais da tela) associando exatamente o nome da coluna no cabeçalho com o dado do lote.
-    2. Coloque APENAS encartes que tenham conteúdo útil (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDORES, QTD).
-    3. Se não houver Peso ou Idade no cabeçalho/linha, NÃO crie os encartes de Peso ou Idade.
-    4. Crie uma canta de venda agressiva em 1 frase exaltando o produto e o vendedor.
+    TEXTO TRANCRITO DO CATÁLOGO:
+    {texto_final_cat[:3000]}
 
-    Retorne EXATAMENTE um JSON válido neste formato:
+    INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
+    1. Crie uma lista de "ENCARTES" (cartões de informação) prioritários para aparecer na tela.
+    2. Coloque APENAS o que existir com valor preenchido na Ordem ou no Catálogo (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
+    3. NUNCA invente dados se não existirem no texto.
+    4. Crie uma canta de venda agressiva ressaltando a linhagem materna e paterna.
+
+    Retorne EXATAMENTE um JSON válido com a seguinte estrutura:
     {{
         "posicao_entrada": "{dados_lote.get('posicao')}",
         "nome_animal": "{dados_lote.get('nome_animal') or dados_lote.get('produto', '')}",
@@ -243,53 +378,40 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         "status_reproducao": "{dados_lote.get('info_reproducao', '')}",
         "tipo_reproducao": "{dados_lote.get('tipo_reproducao', '')}",
         "encartes": [
-            {{"titulo": "NOME_DO_CABEÇALHO", "valor": "VALOR_DA_COLUNA"}}
+            {{"titulo": "CATEGORIA", "valor": "..."}},
+            {{"titulo": "PELAGEM", "valor": "..."}},
+            {{"titulo": "VENDEDOR", "valor": "..."}}
         ],
         "apresentacao": "Frase agressiva de canta...",
-        "genetica_pai": "Linhagem paterna se houver no texto",
-        "genetica_mae": "Linhagem materna se houver no texto",
-        "reproducao_detalhe": "Detalhes de prenhez se houver",
-        "gatilhos": [
-            "Gatilho curto 1",
-            "Gatilho curto 2",
-            "Gatilho curto 3"
-        ]
+        "genetica_pai": "Linhagem paterna identificada ou vazio",
+        "genetica_mae": "Linhagem materna identificada ou vazio",
+        "reproducao_detalhe": "Detalhe da prenhez ou acasalamento se houver",
+        "gatilhos": ["Gatilho 1", "Gatilho 2", "Gatilho 3"]
     }}
     """
 
     url = "https://api.deepseek.com/chat/completions"
     erros = []
 
-    for api_key in api_keys:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+    for api_key in ds_keys:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
             "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user}
-            ],
+            "messages": [{"role": "system", "content": prompt_system}, {"role": "user", "content": prompt_user}],
             "response_format": {"type": "json_object"},
             "temperature": 0.2
         }
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=20)
             res_json = response.json()
-            
             if response.status_code == 200 and 'choices' in res_json:
                 content = res_json['choices'][0]['message']['content']
                 dados_ia = json.loads(content)
+                dados_ia["texto_ocr_claude"] = texto_claude_ocr
                 return dados_ia, ""
             
             msg_erro = res_json.get('error', {}).get('message', response.text)
             erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
-
-            if response.status_code == 429:
-                time.sleep(1)
-                continue
-                
         except Exception as e:
             erros.append(f"Erro na conexão: {str(e)}")
             continue
@@ -297,15 +419,18 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
     detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
     return None, f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}"
 
-def precarregar_proximos_lotes(idx_atual, lista_lotes, mapa_oe, api_keys):
+def precarregar_proximos_lotes_cat(idx_atual, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys):
     proximos_indices = [idx_atual + i for i in range(1, 4) if (idx_atual + i) < len(lista_lotes)]
-    if not proximos_indices or not api_keys:
+    if not proximos_indices or not ds_keys:
         return
         
     def _carregar(i):
         num_lt = lista_lotes[i]
         dados_lt = mapa_oe.get(num_lt, {})
-        analisar_lote_leiloeiro_deepseek(num_lt, dados_lt, api_keys)
+        nome_an = dados_lt.get("nome_animal") or dados_lt.get("produto", "")
+        pag_idx, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt, nome_an) if texto_cat else (-1, "")
+        img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_idx) if (file_bytes_cat and pag_idx >= 0) else None
+        analisar_lote_catalogo_hybrid(num_lt, dados_lt, txt_pag, img_bytes, ds_keys, ant_keys)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         executor.map(_carregar, proximos_indices)
@@ -317,7 +442,7 @@ def run():
         .ordem-indicador { background: #16A34A; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin: 8px 0; font-size: 20px; }
         .banner-parida { background: linear-gradient(135deg, #7E22CE 0%, #581C87 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #A855F7; }
         .banner-prenhez { background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #EF4444; }
-        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #F59E0B; }
+        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .banner-venda { background: linear-gradient(135deg, #EAB308 0%, #CA8A04 100%); color: #000000 !important; padding: 16px; border-radius: 14px; margin-bottom: 12px; font-size: 24px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .animal-info { background: #1E293B; color: white; padding: 15px; border-radius: 12px; margin: 5px 0; border: 1px solid #334155; min-height: 90px; }
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
@@ -326,20 +451,28 @@ def run():
         .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
         .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
+        .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; margin-top: 15px; }
     </style>
     """
     st.markdown(css_code, unsafe_allow_html=True)
 
-    api_keys = obter_api_keys()
+    ds_keys, ant_keys = obter_api_keys()
 
     with st.sidebar:
-        st.header("Arquivo - Modo Ordem")
-        file_oe = st.file_uploader("Ordem de Entrada (PDF)", type="pdf", key="oe_somente")
+        st.header("Arquivos - Modo Catálogo")
+        file_oe = st.file_uploader("Ordem de Entrada (PDF)", type="pdf", key="oe_cat")
+        file_cat = st.file_uploader("Catálogo do Leilão (PDF)", type="pdf", key="cat_cat")
         st.markdown("---")
-        modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_somente")
+        modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_cat")
+        mostrar_preview = st.checkbox("MOSTRAR PREVIEW VISUAL DO CATÁLOGO", value=True)
 
-    file_bytes = file_oe.getvalue() if file_oe else None
-    sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes)
+    file_bytes_oe = file_oe.getvalue() if file_oe else None
+    file_bytes_cat = file_cat.getvalue() if file_cat else None
+    
+    texto_cat = processar_pdf(file_bytes_cat)
+    total_paginas_cat = obter_total_paginas_pdf(file_bytes_cat)
+
+    sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes_oe)
 
     if sequencia_oe:
         lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
@@ -348,54 +481,87 @@ def run():
         lista_lotes = []
         ordem_atual = "NENHUM LOTE ENCONTRADO"
 
-    if 'lote_idx_oe' not in st.session_state:
-        st.session_state.lote_idx_oe = 0
+    if 'lote_idx_cat' not in st.session_state:
+        st.session_state.lote_idx_cat = 0
 
     if not lista_lotes:
-        st.warning("Carregue a Ordem de Entrada (PDF) no menu lateral para começar!")
+        st.warning("Carregue a Ordem de Entrada e o Catálogo em PDF no menu lateral para começar!")
         st.stop()
 
-    if st.session_state.lote_idx_oe >= len(lista_lotes):
-        st.session_state.lote_idx_oe = 0
+    if st.session_state.lote_idx_cat >= len(lista_lotes):
+        st.session_state.lote_idx_cat = 0
 
-    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_oe + 1} de {len(lista_lotes)}"
+    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_cat + 1} de {len(lista_lotes)}"
     st.markdown(f'<div class="ordem-indicador">{ordem_texto}</div>', unsafe_allow_html=True)
 
     col_prev, col_next = st.columns(2)
     with col_prev:
-        if st.button("ANTERIOR", use_container_width=True, key="prev_oe"):
-            st.session_state.lote_idx_oe = max(0, st.session_state.lote_idx_oe - 1)
+        if st.button("ANTERIOR", use_container_width=True, key="btn_prev_cat"):
+            st.session_state.lote_idx_cat = max(0, st.session_state.lote_idx_cat - 1)
             st.rerun()
 
     with col_next:
-        if st.button("PRÓXIMO", use_container_width=True, key="next_oe"):
-            st.session_state.lote_idx_oe = min(len(lista_lotes) - 1, st.session_state.lote_idx_oe + 1)
+        if st.button("PRÓXIMO", use_container_width=True, key="btn_next_cat"):
+            st.session_state.lote_idx_cat = min(len(lista_lotes) - 1, st.session_state.lote_idx_cat + 1)
             st.rerun()
 
-    def ao_mudar_lote_ordem():
-        if "sel_oe_widget" in st.session_state and st.session_state.sel_oe_widget in lista_lotes:
-            st.session_state.lote_idx_oe = lista_lotes.index(st.session_state.sel_oe_widget)
+    def ao_mudar_selectbox_lote():
+        novo_lote = st.session_state.widget_lote_cat_select
+        if novo_lote in lista_lotes:
+            st.session_state.lote_idx_cat = lista_lotes.index(novo_lote)
 
     st.selectbox(
         "Ir para o lote:",
         options=lista_lotes,
-        index=st.session_state.lote_idx_oe,
-        key="sel_oe_widget",
-        on_change=ao_mudar_lote_ordem
+        index=st.session_state.lote_idx_cat,
+        key="widget_lote_cat_select",
+        on_change=ao_mudar_selectbox_lote
     )
 
-    num_lote = lista_lotes[st.session_state.lote_idx_oe]
-    dados_lote = mapa_oe.get(num_lote, {})
+    num_lote = lista_lotes[st.session_state.lote_idx_cat]
+    dados_lote_oe = mapa_oe.get(num_lote, {})
+
+    nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
+    pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
     col_esquerda, col_direita = st.columns([1, 1])
 
+    with col_direita:
+        pag_selecionada = -1
+        if file_bytes_cat:
+            st.markdown("---")
+            col_cat_title, col_cat_num = st.columns([2, 1])
+            pag_sugerida = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
+
+            state_pag_key = f"state_pagina_cat_lote_{num_lote}"
+            if state_pag_key not in st.session_state:
+                st.session_state[state_pag_key] = pag_sugerida
+
+            with col_cat_num:
+                pag_input = st.number_input(
+                    "Página do Catálogo:",
+                    min_value=1,
+                    max_value=total_paginas_cat,
+                    key=state_pag_key
+                )
+                pag_selecionada = pag_input - 1
+
+            with col_cat_title:
+                st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
+
+            if pagina_detectada < 0:
+                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto. Ajuste a página no campo acima se necessário.")
+
+    texto_pagina_catalogo = texto_cat[pag_selecionada] if (texto_cat and 0 <= pag_selecionada < len(texto_cat)) else ""
+    img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada) if (file_bytes_cat and pag_selecionada >= 0) else None
+
     with col_esquerda:
-        with st.spinner("🤖 Leiloeiro IA analisando o lote..."):
-            dados_ia, erro_ia = analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys)
+        with st.spinner("🤖 Claude (Visão) + DeepSeek (Texto) processando o lote..."):
+            dados_ia, erro_ia = analisar_lote_catalogo_hybrid(num_lote, dados_lote_oe, texto_pagina_catalogo, img_pagina_bytes, ds_keys, ant_keys)
 
         if dados_ia:
             lote_texto = f"LOTE {num_lote}"
-            posicao_texto = dados_ia.get("posicao_entrada", dados_lote.get("posicao", f"{st.session_state.lote_idx_oe + 1}º A ENTRAR"))
+            posicao_texto = dados_ia.get("posicao_entrada", dados_lote_oe.get("posicao", f"{st.session_state.lote_idx_cat + 1}º A ENTRAR"))
             st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
             
             if dados_ia.get("porcentagem_venda"):
@@ -411,7 +577,7 @@ def run():
                     st.markdown(f'<div class="banner-inseminacao">💉 {dados_ia["status_reproducao"]}</div>', unsafe_allow_html=True)
 
             if dados_ia.get("nome_animal"):
-                st.markdown(f'<div class="nome-animal-box">bull {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="nome-animal-box">🐂 {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
             encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
@@ -451,12 +617,12 @@ def run():
         elif erro_ia:
             st.error(erro_ia)
 
-        linha_ctx = dados_lote.get('linha_contextualizada', '')
+        linha_ctx = dados_lote_oe.get('linha_contextualizada', '')
         if linha_ctx:
             itens = linha_ctx.split(' | ')
             oe_formatted = "<br>".join([f"• <b>{it.split(':', 1)[0]}:</b> {it.split(':', 1)[1]}" if ':' in it else f"• <b>DADO:</b> {it}" for it in itens])
         else:
-            oe_formatted = dados_lote.get('linha_completa', 'Nenhum dado encontrado na Ordem.')
+            oe_formatted = dados_lote_oe.get('linha_completa', 'Nenhum dado encontrado na Ordem.')
 
         st.markdown(f'''
         <div class="oe-dados-box">
@@ -465,4 +631,19 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-    precarregar_proximos_lotes(st.session_state.lote_idx_oe, lista_lotes, mapa_oe, api_keys)
+        if file_bytes_cat:
+            if mostrar_preview and img_pagina_bytes:
+                st.image(img_pagina_bytes, use_container_width=True)
+
+            txt_exibir = dados_ia.get("texto_ocr_claude") if dados_ia and dados_ia.get("texto_ocr_claude") else texto_pagina_catalogo
+            if txt_exibir:
+                st.markdown(f'''
+                <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
+                    <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO TRANCRITO (CLAUDE OCR / PDF) - PÁGINA {pag_selecionada + 1}</h3>
+                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{txt_exibir[:1500]}</div>
+                </div>
+                ''', unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Envie o arquivo PDF do Catálogo no menu lateral para visualizar as páginas.")
+
+    precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys)
