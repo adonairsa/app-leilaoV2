@@ -3,6 +3,7 @@ import pdfplumber
 import re
 import os
 import requests
+import time
 from io import BytesIO
 
 def obter_api_key():
@@ -104,7 +105,7 @@ def extrair_dados_oe(texto_oe_tuple):
                     dados_por_lote[lt_num] = dados
     return sequencia, dados_por_lote
 
-# ==================== ANÁLISE UNIFICADA DA IA (ECONOMIZA COTA) ====================
+# ==================== ANÁLISE UNIFICADA COM ANTI-BLOQUEIO ====================
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_gemini(num_lote, dados_lote, api_key):
     if not api_key:
@@ -149,32 +150,41 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_key):
     """
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
+    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     ultimo_erro = ""
 
     for mod in modelos:
         for ver in ["v1beta", "v1"]:
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
-                res_json = response.json()
-                if response.status_code == 200 and 'candidates' in res_json:
-                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+            
+            # Tenta até 3 vezes por modelo se bater no limite de velocidade (429)
+            for tentativa in range(3):
+                try:
+                    response = requests.post(url, headers=headers, json=payload, timeout=20)
+                    res_json = response.json()
                     
-                    # Separar as considerações dos gatilhos
-                    if "---GATILHOS---" in resposta_completa:
-                        partes = resposta_completa.split("---GATILHOS---")
-                        consideracoes = partes[0].strip()
-                        # Extrai as linhas dos gatilhos limpando marcações extras
-                        gatilhos_brutos = partes[1].strip().split('\n')
-                        gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
-                        return consideracoes, gatilhos_limpos[:4]
+                    if response.status_code == 200 and 'candidates' in res_json:
+                        resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                        if "---GATILHOS---" in resposta_completa:
+                            partes = resposta_completa.split("---GATILHOS---")
+                            consideracoes = partes[0].strip()
+                            gatilhos_brutos = partes[1].strip().split('\n')
+                            gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
+                            return consideracoes, gatilhos_limpos[:4]
+                        else:
+                            return resposta_completa.strip(), []
+                            
+                    elif response.status_code == 429:
+                        # Bateu no limite de requisições! Espera 8 segundos e tenta de novo.
+                        time.sleep(8)
+                        continue 
                     else:
-                        return resposta_completa.strip(), []
-                else:
-                    ultimo_erro = res_json.get('error', {}).get('message', response.text)
-            except Exception as e:
-                ultimo_erro = str(e)
+                        ultimo_erro = res_json.get('error', {}).get('message', response.text)
+                        break # Sai das tentativas e vai para o próximo modelo
+                        
+                except Exception as e:
+                    ultimo_erro = str(e)
+                    break # Sai das tentativas e vai para o próximo modelo
 
     return f"⚠️ Erro na resposta da API: {ultimo_erro}", []
 
@@ -312,7 +322,6 @@ def run():
 
     with col_direita:
         with st.spinner("🤖 Gemini elaborando a canta e os gatilhos..."):
-            # Chama a API uma vez só!
             analise_ia, gatilhos_ia = analisar_lote_unificado_gemini(num_lote, dados_lote, api_key)
             
             st.markdown(f'''
