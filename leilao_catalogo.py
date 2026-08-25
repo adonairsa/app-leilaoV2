@@ -4,6 +4,7 @@ import re
 import os
 import requests
 import base64
+import time
 from io import BytesIO
 
 def obter_api_key():
@@ -148,7 +149,7 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
                 break
     return dados_atualizados
 
-# ==================== ANÁLISE UNIFICADA DA IA (LEITURA VISUAL + TEXTO) ====================
+# ==================== ANÁLISE UNIFICADA COM ANTI-BLOQUEIO ====================
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
     if not api_key:
@@ -201,32 +202,41 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
 
     payload = {"contents": [{"parts": parts}]}
-    
-    # Modelos suportados pela chave AQ. e visão computacional
     modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     ultimo_erro = ""
 
     for mod in modelos:
         for ver in ["v1beta", "v1"]:
             url = f"https://generativelanguage.googleapis.com/{ver}/models/{mod}:generateContent?key={api_key_clean}"
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=25)
-                res_json = response.json()
-                if response.status_code == 200 and 'candidates' in res_json:
-                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+            
+            # Tenta até 3 vezes por modelo se bater no limite de velocidade (429)
+            for tentativa in range(3):
+                try:
+                    response = requests.post(url, headers=headers, json=payload, timeout=25)
+                    res_json = response.json()
                     
-                    if "---GATILHOS---" in resposta_completa:
-                        partes = resposta_completa.split("---GATILHOS---")
-                        consideracoes = partes[0].strip()
-                        gatilhos_brutos = partes[1].strip().split('\n')
-                        gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
-                        return consideracoes, gatilhos_limpos[:4]
+                    if response.status_code == 200 and 'candidates' in res_json:
+                        resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                        if "---GATILHOS---" in resposta_completa:
+                            partes = resposta_completa.split("---GATILHOS---")
+                            consideracoes = partes[0].strip()
+                            gatilhos_brutos = partes[1].strip().split('\n')
+                            gatilhos_limpos = [g.strip('- *123.') for g in gatilhos_brutos if g.strip()]
+                            return consideracoes, gatilhos_limpos[:4]
+                        else:
+                            return resposta_completa.strip(), []
+                            
+                    elif response.status_code == 429:
+                        # Bateu no limite de requisições! Espera 8 segundos e tenta de novo.
+                        time.sleep(8)
+                        continue 
                     else:
-                        return resposta_completa.strip(), []
-                else:
-                    ultimo_erro = res_json.get('error', {}).get('message', response.text)
-            except Exception as e:
-                ultimo_erro = str(e)
+                        ultimo_erro = res_json.get('error', {}).get('message', response.text)
+                        break # Sai das tentativas e vai para o próximo modelo
+                        
+                except Exception as e:
+                    ultimo_erro = str(e)
+                    break # Sai das tentativas e vai para o próximo modelo
 
     return f"⚠️ Erro na resposta da API: {ultimo_erro}", []
 
@@ -378,14 +388,15 @@ def run():
             with st.spinner("🤖 Gemini elaborando a canta e os gatilhos (Visão + Texto)..."):
                 analise_ia, gatilhos_ia = analisar_lote_unificado_catalogo(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_key)
                 
+                # Exibe 🎯 Gatilhos ACIMA das considerações, como pedido anteriormente
+                if gatilhos_ia:
+                    st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
+                    for gat in gatilhos_ia:
+                        st.markdown(f'<div class="gatilho-ia-card">🔥 {gat}</div>', unsafe_allow_html=True)
+                        
                 st.markdown(f'''
                 <div class="ai-consideracoes-box">
                     <h3 style="margin-top:0; color:#818CF8; font-size:18px;">🤖 CONSIDERAÇÕES DA IA (LINHAGEM & REPRODUÇÃO)</h3>
                     <div>{analise_ia}</div>
                 </div>
                 ''', unsafe_allow_html=True)
-
-                if gatilhos_ia:
-                    st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
-                    for gat in gatilhos_ia:
-                        st.markdown(f'<div class="gatilho-ia-card">🔥 {gat}</div>', unsafe_allow_html=True)
