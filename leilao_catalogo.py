@@ -141,15 +141,6 @@ css_code = """
         font-style: italic;
         border: 2px solid #10B981;
     }
-    .cache-info {
-        background: #1E293B;
-        color: #6EE7B7;
-        padding: 6px;
-        border-radius: 6px;
-        font-size: 12px;
-        margin: 3px 0;
-        text-align: center;
-    }
 </style>
 """
 st.markdown(css_code, unsafe_allow_html=True)
@@ -179,9 +170,9 @@ def hash_bytes(b):
         return ""
     return hashlib.md5(b).hexdigest()
 
-# ==================== PROCESSAMENTO ====================
-@st.cache_data(ttl=7200, show_spinner=False)
+# ==================== PROCESSAMENTO (SEM CACHE PROBLEMÁTICO) ====================
 def processar_pdf_texto(file_bytes):
+    """SEM @st.cache_data - sempre processa"""
     paginas = []
     if not file_bytes:
         return paginas
@@ -194,8 +185,8 @@ def processar_pdf_texto(file_bytes):
         pass
     return paginas
 
-@st.cache_data(ttl=7200, show_spinner=False)
 def contar_paginas_pdf(file_bytes):
+    """SEM cache - sempre conta"""
     if not file_bytes:
         return 0
     try:
@@ -204,8 +195,8 @@ def contar_paginas_pdf(file_bytes):
     except:
         return 0
 
-@st.cache_data(ttl=7200, show_spinner=False)
 def obter_imagem_bytes_pagina(file_bytes, num_pagina, resolucao=150, qualidade=85):
+    """SEM cache - sempre renderiza"""
     if not file_bytes or num_pagina < 0:
         return None
     try:
@@ -220,21 +211,6 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina, resolucao=150, qualidade=8
     return None
 
 # ==================== DEEPSEEK LÊ A O.E. ====================
-@st.cache_data(ttl=7200, show_spinner=False)
-def deepseek_ler_ordem_cacheado(texto_oe_hash, ds_keys_tuple):
-    """Versão cacheada da leitura da O.E."""
-    ds_keys = list(ds_keys_tuple)
-    if not ds_keys:
-        return [], {}
-    
-    # Reconstrói o texto a partir do cache do Streamlit
-    texto_oe_completo = st.session_state.get(f"texto_oe_{texto_oe_hash}", "")
-    
-    if not texto_oe_completo:
-        return [], {}
-    
-    return deepseek_ler_ordem(texto_oe_completo, ds_keys)
-
 def deepseek_ler_ordem(texto_oe_completo, ds_keys):
     if not ds_keys:
         return [], {}
@@ -245,7 +221,7 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
     TEXTO DA O.E.:
     {texto_oe_completo[:6000]}
 
-    Extraia TODOS os lotes, na ordem em que aparecem.
+    Extraia TODOS os lotes.
 
     Retorne JSON:
     {{
@@ -350,10 +326,8 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
 
     return None
 
-# ==================== ÍNDICE DO CATÁLOGO ====================
-@st.cache_data(ttl=7200, show_spinner=False)
-def construir_indice_catalogo(file_bytes_cat, hash_arquivo, ant_keys_tuple, max_paginas=60):
-    ant_keys = list(ant_keys_tuple)
+# ==================== ÍNDICE DO CATÁLOGO (SEM CACHE) ====================
+def construir_indice_catalogo(file_bytes_cat, ant_keys, max_paginas=60):
     indice = {}
     total = min(contar_paginas_pdf(file_bytes_cat), max_paginas)
     if total == 0 or not ant_keys:
@@ -392,14 +366,6 @@ def encontrar_no_indice(num_lote_oe, nome_animal_oe, indice):
     return None
 
 # ==================== DEEPSEEK CRUZA ====================
-@st.cache_data(ttl=7200, show_spinner=False)
-def deepseek_cruzar_cacheado(num_lote, dados_ordem_json, dados_catalogo_json, ds_keys_tuple):
-    """Versão cacheada do cruzamento"""
-    ds_keys = list(ds_keys_tuple)
-    dados_ordem = json.loads(dados_ordem_json) if dados_ordem_json else {}
-    dados_catalogo = json.loads(dados_catalogo_json) if dados_catalogo_json else {}
-    return deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys)
-
 def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
     if not ds_keys:
         return None
@@ -470,10 +436,6 @@ def renderizar_pedigree(dados_catalogo):
 # ==================== MAIN ====================
 def run():
     ds_keys, ant_keys = obter_api_keys()
-    
-    # Converte para tuple para poder usar no cache
-    ds_keys_tuple = tuple(ds_keys)
-    ant_keys_tuple = tuple(ant_keys)
 
     with st.sidebar:
         st.header("📂 Arquivos")
@@ -503,12 +465,12 @@ def run():
         st.warning("Carregue a O.E. e configure o DeepSeek!")
         st.stop()
 
-    # Índice do catálogo
+    # Índice do catálogo (SEM CACHE - sempre processa)
     indice_catalogo = {}
     total_paginas_cat = 0
     if file_bytes_cat and ant_keys:
         indice_catalogo, total_paginas_cat = construir_indice_catalogo(
-            file_bytes_cat, hash_bytes(file_bytes_cat), ant_keys_tuple, max_paginas_catalogo
+            file_bytes_cat, ant_keys, max_paginas_catalogo
         )
 
     if modo_ordenacao == "ORDEM NUMÉRICA":
@@ -544,19 +506,11 @@ def run():
     dados_catalogo = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
     pagina_detectada = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
 
-    # Cruzamento com DeepSeek (CACHEADO)
+    # Cruzamento com DeepSeek
     dados_finais = None
     if dados_catalogo and ds_keys:
         with st.spinner("🔄 Cruzando informações..."):
-            dados_finais = deepseek_cruzar_cacheado(
-                num_lote,
-                json.dumps(dados_lote, ensure_ascii=False),
-                json.dumps(dados_catalogo, ensure_ascii=False),
-                ds_keys_tuple
-            )
-        
-        if dados_finais:
-            st.markdown(f'<div class="cache-info">⚡ Processado com cache</div>', unsafe_allow_html=True)
+            dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
 
     # ==================== LAYOUT ====================
     col_esquerda, col_direita = st.columns([1, 1])
@@ -572,6 +526,7 @@ def run():
                 unsafe_allow_html=True
             )
 
+        # CATÁLOGO SEMPRE VISÍVEL
         if file_bytes_cat and pagina_detectada >= 0:
             st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}</div>', unsafe_allow_html=True)
             img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada)
