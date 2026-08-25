@@ -70,45 +70,177 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote):
             return idx, pagina
     return -1, ""
 
-@st.cache_data
-def extrair_dados_oe(texto_oe_tuple):
-    texto_oe = list(texto_oe_tuple)
+@st.cache_data(ttl=7200, show_spinner=False)
+def extrair_dados_oe_pdf(file_bytes):
     sequencia = []
-    mapa_bruto = {}
-    
-    if not texto_oe:
-        return sequencia, mapa_bruto
-    
-    for pagina in texto_oe:
-        for linha in pagina.split('\n'):
-            linha_limpa = linha.strip()
-            if not linha_limpa or "PROGRAMA" in linha_limpa.upper():
-                continue
+    dados_por_lote = {}
 
-            parts = [p.strip() for p in (linha_limpa.split('|') if '|' in linha_limpa else re.split(r'\s{2,}', linha_limpa)) if p.strip()]
-            
-            if len(parts) >= 2:
-                raw_lt = ""
-                for p in parts[:3]:
-                    num = re.sub(r"\D", "", p)
-                    if num and 1 <= int(num) <= 999:
-                        raw_lt = num
-                        break
+    if not file_bytes:
+        return sequencia, dados_por_lote
 
-                if raw_lt and raw_lt.isdigit():
-                    num_lote = f"{int(raw_lt):02d}"
-                    if num_lote not in sequencia:
-                        sequencia.append(num_lote)
-                    mapa_bruto[num_lote] = {
-                        "lote": num_lote,
-                        "linha_bruta": linha_limpa,
-                        "partes": parts
-                    }
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                table_success = False
 
-    return sequencia, mapa_bruto
+                if tables:
+                    for table in tables:
+                        col_map = {}
+                        for row in table:
+                            if not row:
+                                continue
+                            clean_row = [re.sub(r"\s+", " ", str(cell or "")).strip() for cell in row]
+                            
+                            if not any(clean_row) or "PROGRAMA" in " ".join(clean_row).upper():
+                                continue
+
+                            row_str_upper = " ".join(clean_row).upper()
+
+                            # Identifica e mapeia colunas pelo cabeçalho do PDF
+                            if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
+                                col_map = {}
+                                for idx, cell in enumerate(clean_row):
+                                    c_u = cell.upper()
+                                    if re.search(r"\bO\.?E\.?\b", c_u) or "ORDEM" in c_u or "POSIÇ" in c_u:
+                                        col_map["oe"] = idx
+                                    elif re.search(r"\b(LT|LOTE)\b", c_u):
+                                        col_map["lote"] = idx
+                                    elif "QTD" in c_u or "QUANT" in c_u:
+                                        col_map["qtd"] = idx
+                                    elif "IDADE" in c_u:
+                                        col_map["idade"] = idx
+                                    elif "PESO" in c_u:
+                                        col_map["peso"] = idx
+                                    elif "CATEGORIA" in c_u:
+                                        col_map["categoria"] = idx
+                                    elif "PELAGEM" in c_u:
+                                        col_map["pelagem"] = idx
+                                    elif "PRODUTO" in c_u or "ANIMAL" in c_u:
+                                        col_map["produto"] = idx
+                                    elif "VENDEDOR" in c_u or "PROPRIET" in c_u:
+                                        col_map["vendedor"] = idx
+                                continue
+
+                            lt_col = col_map.get("lote", 1 if len(clean_row) > 1 else 0)
+                            raw_lt = clean_row[lt_col] if lt_col < len(clean_row) else ""
+                            clean_lt = re.sub(r"\D", "", raw_lt)
+
+                            if not clean_lt:
+                                for idx in [1, 0, 2]:
+                                    if idx < len(clean_row):
+                                        val = re.sub(r"\D", "", clean_row[idx])
+                                        if val and 1 <= int(val) <= 999:
+                                            clean_lt = val
+                                            break
+
+                            if clean_lt and clean_lt.isdigit():
+                                numero_lote = int(clean_lt)
+                                lt_num = f"{numero_lote:02d}"
+
+                                oe_col = col_map.get("oe", 0)
+                                raw_oe = clean_row[oe_col] if oe_col < len(clean_row) else ""
+                                clean_oe = re.sub(r"\D", "", raw_oe)
+                                posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else (raw_oe if raw_oe else f"{len(sequencia)+1}º A ENTRAR")
+
+                                def get_val(key):
+                                    return clean_row[col_map[key]] if key in col_map and col_map[key] < len(clean_row) else ""
+
+                                qtd = get_val("qtd")
+                                idade = get_val("idade")
+                                peso = get_val("peso")
+                                categoria = get_val("categoria")
+                                pelagem = get_val("pelagem")
+                                produto = get_val("produto")
+                                vendedor = get_val("vendedor")
+
+                                if not produto:
+                                    if len(clean_row) == 6:
+                                        categoria = categoria or clean_row[2]
+                                        pelagem = pelagem or clean_row[3]
+                                        produto = clean_row[4]
+                                        vendedor = vendedor or clean_row[5]
+                                    elif len(clean_row) == 8:
+                                        produto = clean_row[6]
+                                        vendedor = vendedor or clean_row[7]
+
+                                nome_animal = produto
+                                porcentagem_venda = ""
+                                m_perc = re.search(r"(\d+%)\s*de:\s*(.+)", produto, re.IGNORECASE)
+                                if m_perc:
+                                    porcentagem_venda = m_perc.group(1)
+                                    nome_animal = m_perc.group(2).strip()
+
+                                info_repro, tipo_repro = "", ""
+                                m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", f"{categoria} {produto}", re.IGNORECASE)
+                                if m_repro:
+                                    info_repro = m_repro.group(0).strip()
+                                    txt_low = info_repro.lower()
+                                    if "parida" in txt_low: tipo_repro = "parida"
+                                    elif "prenh" in txt_low: tipo_repro = "prenhez"
+                                    elif "inseminada" in txt_low: tipo_repro = "inseminacao"
+
+                                if lt_num not in sequencia:
+                                    sequencia.append(lt_num)
+
+                                dados_por_lote[lt_num] = {
+                                    "lote": lt_num,
+                                    "posicao": posicao_fmt,
+                                    "qtd": qtd,
+                                    "idade": idade,
+                                    "peso": peso,
+                                    "categoria": categoria,
+                                    "pelagem": pelagem,
+                                    "produto": produto,
+                                    "nome_animal": nome_animal,
+                                    "porcentagem_venda": porcentagem_venda,
+                                    "vendedor": vendedor,
+                                    "info_reproducao": info_repro,
+                                    "tipo_reproducao": tipo_repro,
+                                    "linha_completa": " | ".join([c for c in clean_row if c])
+                                }
+                                table_success = True
+
+                # Contingência para texto simples caso o PDF não possua tabela vetorial
+                if not table_success:
+                    texto = page.extract_text(layout=True) or page.extract_text() or ""
+                    if texto:
+                        for linha in texto.split('\n'):
+                            linha_limpa = linha.strip()
+                            if not linha_limpa or "PROGRAMA" in linha_limpa.upper():
+                                continue
+
+                            m_pos = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
+                            if m_pos:
+                                pos_num = int(m_pos.group(1))
+                                num_lote = int(m_pos.group(2))
+                                if 1 <= num_lote <= 999:
+                                    lt_num = f"{num_lote:02d}"
+                                    if lt_num not in sequencia:
+                                        sequencia.append(lt_num)
+                                    restante = linha_limpa[m_pos.end():].strip().split()
+                                    
+                                    dados_por_lote[lt_num] = {
+                                        "lote": lt_num,
+                                        "posicao": f"{pos_num}º A ENTRAR",
+                                        "qtd": restante[0] if len(restante)>0 else "",
+                                        "idade": restante[1] if len(restante)>1 else "",
+                                        "peso": restante[2] if len(restante)>2 else "",
+                                        "categoria": restante[3] if len(restante)>3 else "",
+                                        "pelagem": "",
+                                        "produto": " ".join(restante[4:-1]) if len(restante)>5 else (restante[4] if len(restante)>4 else ""),
+                                        "vendedor": restante[-1] if len(restante)>4 else "",
+                                        "info_reproducao": "", "tipo_reproducao": "",
+                                        "nome_animal": " ".join(restante[4:-1]) if len(restante)>5 else "",
+                                        "porcentagem_venda": "", "linha_completa": linha_limpa
+                                    }
+    except Exception as e:
+        st.error(f"Erro ao extrair PDF: {str(e)}")
+
+    return sequencia, dados_por_lote
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_catalogo_deepseek(num_lote, dados_brutos, texto_pagina_cat, api_keys):
+def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_keys):
     if not api_keys:
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
@@ -117,32 +249,43 @@ def analisar_lote_catalogo_deepseek(num_lote, dados_brutos, texto_pagina_cat, ap
 
     prompt_user = f"""
     Analise o LOTE {num_lote}:
-    LINHA BRUTA DA ORDEM DE ENTRADA: {dados_brutos.get('linha_bruta', '')}
-    PARTES EXTRAÍDAS: {dados_brutos.get('partes', [])}
+    DADOS DA ORDEM:
+    - Posição de Entrada: {dados_lote.get('posicao', 'N/A')}
+    - Número do Lote: {num_lote}
+    - Categoria: {dados_lote.get('categoria', '')}
+    - Pelagem: {dados_lote.get('pelagem', '')}
+    - Produto / Animal: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
+    - Qtd: {dados_lote.get('qtd', '')}
+    - Peso: {dados_lote.get('peso', '')}
+    - Idade: {dados_lote.get('idade', '')}
+    - Status Reprodutivo: {dados_lote.get('info_reproducao', '')}
+    - Vendedor: {dados_lote.get('vendedor', '')}
+    - Linha Bruta Ordem: {dados_lote.get('linha_completa', '')}
 
     TEXTO DO CATÁLOGO DO LOTE:
     {texto_pagina_cat[:2000] if texto_pagina_cat else 'N/A'}
 
     INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
     1. Crie uma lista de "ENCARTES" (cartões de informação) prioritários para aparecer na tela.
-    2. Coloque APENAS o que existir e agregar valor (ex: CATEGORIA, PELAGEM, PESO, IDADE, REPRODUÇÃO, VENDEDOR, OFERTA, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
-    3. NUNCA invente dados se não houver no texto.
-    4. Crie uma canta de venda agressiva ressaltando linhagem materna e paterna.
+    2. Coloque APENAS o que existir com valor preenchido na Ordem ou no Catálogo e que agregue valor ao lote (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
+    3. NUNCA invente peso ou idade se o campo não existir nos textos.
+    4. Crie uma canta de venda agressiva ressaltando linhagem materna e paterna do catálogo.
 
     Retorne EXATAMENTE um JSON válido com a seguinte estrutura:
     {{
-        "posicao_entrada": "1º A ENTRAR",
-        "nome_animal": "Nome do Animal ou Descrição do Produto",
-        "porcentagem_venda": "100% ou 50%",
-        "status_reproducao": "Prenhe / Parida / Inseminada ou vazio",
-        "tipo_reproducao": "prenhez, parida, inseminacao ou vazio",
+        "posicao_entrada": "{dados_lote.get('posicao')}",
+        "nome_animal": "{dados_lote.get('nome_animal') or dados_lote.get('produto', '')}",
+        "porcentagem_venda": "{dados_lote.get('porcentagem_venda', '')}",
+        "status_reproducao": "{dados_lote.get('info_reproducao', '')}",
+        "tipo_reproducao": "{dados_lote.get('tipo_reproducao', '')}",
         "encartes": [
-            {{"titulo": "CATEGORIA", "valor": "Novilha"}},
-            {{"titulo": "PELAGEM", "valor": "Tordilho"}},
-            {{"titulo": "PESO/IDADE", "valor": "514 Kg | 15m"}},
-            {{"titulo": "VENDEDOR", "valor": "Nelore HEJ"}}
+            {{"titulo": "CATEGORIA", "valor": "..."}},
+            {{"titulo": "PELAGEM", "valor": "..."}},
+            {{"titulo": "PESO/IDADE", "valor": "..."}},
+            {{"titulo": "VENDEDOR", "valor": "..."}}
         ],
-        "apresentacao": "Frase agressiva de venda para o leiloeiro destacar na pista em 1 frase.",
+        "apresentacao": "Frase agressiva de canta...",
         "genetica_pai": "Linhagem paterna identificada no catálogo ou vazio",
         "genetica_mae": "Linhagem materna identificada no catálogo ou vazio",
         "reproducao_detalhe": "Detalhe da prenhez ou acasalamento do catálogo ou vazio",
@@ -201,7 +344,7 @@ def run():
         .ordem-indicador { background: #16A34A; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin: 8px 0; font-size: 20px; }
         .banner-parida { background: linear-gradient(135deg, #7E22CE 0%, #581C87 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #A855F7; }
         .banner-prenhez { background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #EF4444; }
-        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #F59E0B; }
+        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .banner-venda { background: linear-gradient(135deg, #EAB308 0%, #CA8A04 100%); color: #000000 !important; padding: 16px; border-radius: 14px; margin-bottom: 12px; font-size: 24px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .animal-info { background: #1E293B; color: white; padding: 15px; border-radius: 12px; margin: 5px 0; border: 1px solid #334155; min-height: 90px; }
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
@@ -224,10 +367,10 @@ def run():
         modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_cat")
         mostrar_preview = st.checkbox("MOSTRAR PREVIEW VISUAL DO CATÁLOGO", value=True)
 
-    texto_oe = processar_pdf(file_oe.getvalue()) if file_oe else []
+    file_bytes_oe = file_oe.getvalue() if file_oe else None
     texto_cat = processar_pdf(file_cat.getvalue()) if file_cat else []
 
-    sequencia_oe, mapa_bruto = extrair_dados_oe(tuple(texto_oe))
+    sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes_oe)
 
     if sequencia_oe:
         lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
@@ -264,7 +407,7 @@ def run():
     st.session_state.lote_idx_cat = lista_lotes.index(lote_selecionado)
 
     num_lote = lista_lotes[st.session_state.lote_idx_cat]
-    dados_brutos = mapa_bruto.get(num_lote, {})
+    dados_lote_oe = mapa_oe.get(num_lote, {})
 
     pagina_catalogo, texto_pagina_catalogo = encontrar_pagina_catalogo(tuple(texto_cat), num_lote) if texto_cat else (-1, "")
     img_pagina_bytes = obter_imagem_bytes_pagina(file_cat.getvalue(), pagina_catalogo) if (file_cat and pagina_catalogo >= 0) else None
@@ -273,11 +416,11 @@ def run():
 
     with col_esquerda:
         with st.spinner("🤖 Leiloeiro IA cruzando Ordem + Catálogo..."):
-            dados_ia, erro_ia = analisar_lote_catalogo_deepseek(num_lote, dados_brutos, texto_pagina_catalogo, api_keys)
+            dados_ia, erro_ia = analisar_lote_catalogo_deepseek(num_lote, dados_lote_oe, texto_pagina_catalogo, api_keys)
 
         if dados_ia:
             lote_texto = f"LOTE {num_lote}"
-            posicao_texto = dados_ia.get("posicao_entrada", f"{st.session_state.lote_idx_cat + 1}º A ENTRAR")
+            posicao_texto = dados_ia.get("posicao_entrada", dados_lote_oe.get("posicao", f"{st.session_state.lote_idx_cat + 1}º A ENTRAR"))
             st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
             
             if dados_ia.get("porcentagem_venda"):
@@ -295,8 +438,7 @@ def run():
             if dados_ia.get("nome_animal"):
                 st.markdown(f'<div class="nome-animal-box">🐂 {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
-            # RENDERIZAÇÃO DINÂMICA DOS ENCARTES GERADOS PELA IA
-            encartes = dados_ia.get("encartes", [])
+            encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
                 num_encartes = len(encartes)
                 cols_count = min(3, max(1, num_encartes))
