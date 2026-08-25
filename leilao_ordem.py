@@ -8,8 +8,6 @@ from io import BytesIO
 
 def obter_api_keys():
     chaves_brutas = []
-    
-    # 1. Tenta carregar do Secrets do Streamlit
     try:
         for secret_name in ["GEMINI_API_KEYS", "GEMINI_API_KEY", "OPENAI_API_KEY"]:
             if secret_name in st.secrets:
@@ -21,13 +19,11 @@ def obter_api_keys():
     except Exception:
         pass
 
-    # 2. Tenta carregar das variáveis de ambiente
     if not chaves_brutas:
         env_val = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
         if env_val:
             chaves_brutas.extend(env_val.split(","))
 
-    # 3. Limpeza rigorosa de cada chave
     chaves_limpas = []
     for item in chaves_brutas:
         s = str(item).strip()
@@ -206,36 +202,39 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     """
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
+    # Modelo 1.5-flash mantido exclusivamente para garantir suporte universal com API Key
+    mod = "gemini-1.5-flash"
     erros = []
 
     for api_key in api_keys:
-        for mod in modelos:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
-                res_json = response.json()
-                
-                if response.status_code == 200 and 'candidates' in res_json:
-                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
-                    if "---GATILHOS---" in resposta_completa:
-                        partes = resposta_completa.split("---GATILHOS---")
-                        consideracoes = partes[0].strip()
-                        gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
-                        return consideracoes, gatilhos_limpos[:4]
-                    else:
-                        return resposta_completa.strip(), []
-                
-                msg_erro = res_json.get('error', {}).get('message', response.text)
-                erros.append(f"Chave ...{api_key[-6:]} ({mod}): {msg_erro}")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
+            res_json = response.json()
+            
+            if response.status_code == 200 and 'candidates' in res_json:
+                resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                if "---GATILHOS---" in resposta_completa:
+                    partes = resposta_completa.split("---GATILHOS---")
+                    consideracoes = partes[0].strip()
+                    gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
+                    return consideracoes, gatilhos_limpos[:4]
+                else:
+                    return resposta_completa.strip(), []
+            
+            msg_erro = res_json.get('error', {}).get('message', response.text)
+            if response.status_code in [401, 403] or "invalid authentication" in msg_erro.lower():
+                erros.append(f"Chave ...{api_key[-6:]}: Gerada fora do AI Studio ou sem permissão.")
+            else:
+                erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
 
-                if response.status_code == 429:
-                    time.sleep(1)
-                    break  # Tenta próxima chave se estourar o limite
-                    
-            except Exception as e:
-                erros.append(f"Erro de Conexão ({mod}): {str(e)}")
+            if response.status_code == 429:
+                time.sleep(1)
                 continue
+                
+        except Exception as e:
+            erros.append(f"Erro na conexão: {str(e)}")
+            continue
 
     detalhe_erro = erros[-1] if erros else "Chave inválida ou recusada pelo Google."
     return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
