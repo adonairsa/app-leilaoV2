@@ -7,7 +7,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Importação segura para evitar erros caso os arquivos não estejam na raiz
+# Importação dos módulos da pasta raiz
 try:
     import leilao_catalogo
 except ModuleNotFoundError:
