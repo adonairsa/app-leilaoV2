@@ -5,35 +5,41 @@ import os
 import requests
 import json
 import time
+import base64
 import concurrent.futures
 from io import BytesIO
 
 def obter_api_keys():
-    chaves_brutas = []
+    chaves_deepseek = []
+    chaves_anthropic = []
+    
     try:
         for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
             if secret_name in st.secrets:
                 val = st.secrets[secret_name]
-                if isinstance(val, (list, tuple)):
-                    chaves_brutas.extend(val)
-                elif isinstance(val, str):
-                    chaves_brutas.extend(val.split(","))
+                if isinstance(val, (list, tuple)): chaves_deepseek.extend(val)
+                elif isinstance(val, str): chaves_deepseek.extend(val.split(","))
+                
+        for secret_name in ["ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]:
+            if secret_name in st.secrets:
+                val = st.secrets[secret_name]
+                if isinstance(val, (list, tuple)): chaves_anthropic.extend(val)
+                elif isinstance(val, str): chaves_anthropic.extend(val.split(","))
     except Exception:
         pass
 
-    if not chaves_brutas:
+    if not chaves_deepseek:
         env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
-        if env_val:
-            chaves_brutas.extend(env_val.split(","))
+        if env_val: chaves_deepseek.extend(env_val.split(","))
 
-    chaves_limpas = []
-    for item in chaves_brutas:
-        s = str(item).strip()
-        s_clean = re.sub(r"[\[\]'\" \n\r\t]", "", s)
-        if s_clean and s_clean not in chaves_limpas:
-            chaves_limpas.append(s_clean)
+    if not chaves_anthropic:
+        env_val = os.environ.get("ANTHROPIC_API_KEYS") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY") or ""
+        if env_val: chaves_anthropic.extend(env_val.split(","))
 
-    return chaves_limpas
+    clean_ds = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_deepseek if str(x).strip()]
+    clean_ant = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_anthropic if str(x).strip()]
+
+    return clean_ds, clean_ant
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -75,6 +81,52 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina):
         return None
     return None
 
+@st.cache_data(show_spinner=False)
+def extrair_texto_imagem_claude(img_bytes, ant_keys):
+    if not img_bytes or not ant_keys:
+        return ""
+
+    base64_image = base64.b64encode(img_bytes).decode('utf-8')
+    url = "https://api.anthropic.com/v1/messages"
+
+    payload = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 1000,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Transcreva todo o texto da página deste catálogo de leilão: nome do animal, número do lote, categoria, pelagem, data de nascimento, registro, vendedor, árvore genealógica (pai, mãe, avôs) e observações."
+                }
+            ]
+        }]
+    }
+
+    for api_key in ant_keys:
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
+            res_json = response.json()
+            if response.status_code == 200 and 'content' in res_json:
+                return res_json['content'][0]['text']
+        except Exception:
+            continue
+
+    return ""
+
 @st.cache_data
 def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
     texto_cat = list(texto_cat_tuple)
@@ -83,7 +135,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
 
     num_clean = re.sub(r"\D", "", str(num_lote or ""))
 
-    # 1. Busca por número de lote no texto do PDF
     if num_clean:
         n_int = int(num_clean)
         padroes = [
@@ -95,7 +146,6 @@ def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
                 if pagina and re.search(pattern, pagina, re.IGNORECASE):
                     return idx, pagina
 
-    # 2. Cruzamento por palavras do Nome do Animal/Produto
     if nome_animal:
         ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILÕES", "LOTE"}
         palavras = [
@@ -293,26 +343,32 @@ def extrair_dados_oe_pdf(file_bytes):
     return sequencia, dados_por_lote
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_keys):
-    if not api_keys:
+def analisar_lote_catalogo_hybrid(num_lote, dados_lote, texto_pagina_cat, img_pagina_bytes, ds_keys, ant_keys):
+    texto_claude_ocr = ""
+    if ant_keys and img_pagina_bytes:
+        texto_claude_ocr = extrair_texto_imagem_claude(img_pagina_bytes, ant_keys)
+
+    texto_final_cat = f"--- OCR DO CLAUDE (IMAGEM DA PÁGINA) ---\n{texto_claude_ocr}\n\n--- TEXTO EXTRAÍDO DO PDF ---\n{texto_pagina_cat}"
+
+    if not ds_keys:
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler as informações da Ordem de Entrada e do Catálogo de um Lote e organizar os dados visuais para o leiloeiro na pista."""
+    Sua missão é ler as informações da Ordem de Entrada e da Transcrição do Catálogo de um Lote e organizar a canta e encartes visuais."""
 
     prompt_user = f"""
     Analise o LOTE {num_lote}:
-    📍 DADOS DA ORDEM ROTULADOS (CHAVE: VALOR):
+    📍 DADOS DA ORDEM ROTULADOS:
     {dados_lote.get('linha_contextualizada', dados_lote.get('linha_completa', ''))}
 
-    TEXTO DO CATÁLOGO DO LOTE:
-    {texto_pagina_cat[:2000] if texto_pagina_cat else 'N/A'}
+    TEXTO TRANCRITO DO CATÁLOGO:
+    {texto_final_cat[:3000]}
 
     INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
     1. Crie uma lista de "ENCARTES" (cartões de informação) prioritários para aparecer na tela.
-    2. Coloque APENAS o que existir com valor preenchido na Ordem ou no Catálogo e que agregue valor ao lote (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
-    3. NUNCA invente peso ou idade se o campo não existir nos textos.
-    4. Crie uma canta de venda agressiva ressaltando linhagem materna e paterna do catálogo.
+    2. Coloque APENAS o que existir com valor preenchido na Ordem ou no Catálogo (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD, REGISTRO/RG, AVALIAÇÃO/iABCZ/IQG).
+    3. NUNCA invente dados se não existirem no texto.
+    4. Crie uma canta de venda agressiva ressaltando a linhagem materna e paterna.
 
     Retorne EXATAMENTE um JSON válido com a seguinte estrutura:
     {{
@@ -324,54 +380,38 @@ def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_
         "encartes": [
             {{"titulo": "CATEGORIA", "valor": "..."}},
             {{"titulo": "PELAGEM", "valor": "..."}},
-            {{"titulo": "PESO/IDADE", "valor": "..."}},
             {{"titulo": "VENDEDOR", "valor": "..."}}
         ],
         "apresentacao": "Frase agressiva de canta...",
-        "genetica_pai": "Linhagem paterna identificada no catálogo ou vazio",
-        "genetica_mae": "Linhagem materna identificada no catálogo ou vazio",
-        "reproducao_detalhe": "Detalhe da prenhez ou acasalamento do catálogo ou vazio",
-        "gatilhos": [
-            "Gatilho curto 1",
-            "Gatilho curto 2",
-            "Gatilho curto 3"
-        ]
+        "genetica_pai": "Linhagem paterna identificada ou vazio",
+        "genetica_mae": "Linhagem materna identificada ou vazio",
+        "reproducao_detalhe": "Detalhe da prenhez ou acasalamento se houver",
+        "gatilhos": ["Gatilho 1", "Gatilho 2", "Gatilho 3"]
     }}
     """
 
     url = "https://api.deepseek.com/chat/completions"
     erros = []
 
-    for api_key in api_keys:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+    for api_key in ds_keys:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
             "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user}
-            ],
+            "messages": [{"role": "system", "content": prompt_system}, {"role": "user", "content": prompt_user}],
             "response_format": {"type": "json_object"},
             "temperature": 0.2
         }
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=20)
             res_json = response.json()
-            
             if response.status_code == 200 and 'choices' in res_json:
                 content = res_json['choices'][0]['message']['content']
                 dados_ia = json.loads(content)
+                dados_ia["texto_ocr_claude"] = texto_claude_ocr
                 return dados_ia, ""
             
             msg_erro = res_json.get('error', {}).get('message', response.text)
             erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
-
-            if response.status_code == 429:
-                time.sleep(1)
-                continue
-                
         except Exception as e:
             erros.append(f"Erro na conexão: {str(e)}")
             continue
@@ -379,17 +419,18 @@ def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_
     detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
     return None, f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}"
 
-def precarregar_proximos_lotes_cat(idx_atual, lista_lotes, mapa_oe, texto_cat, api_keys):
+def precarregar_proximos_lotes_cat(idx_atual, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys):
     proximos_indices = [idx_atual + i for i in range(1, 4) if (idx_atual + i) < len(lista_lotes)]
-    if not proximos_indices or not api_keys:
+    if not proximos_indices or not ds_keys:
         return
         
     def _carregar(i):
         num_lt = lista_lotes[i]
         dados_lt = mapa_oe.get(num_lt, {})
         nome_an = dados_lt.get("nome_animal") or dados_lt.get("produto", "")
-        _, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt, nome_an) if texto_cat else (-1, "")
-        analisar_lote_catalogo_deepseek(num_lt, dados_lt, txt_pag, api_keys)
+        pag_idx, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt, nome_an) if texto_cat else (-1, "")
+        img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_idx) if (file_bytes_cat and pag_idx >= 0) else None
+        analisar_lote_catalogo_hybrid(num_lt, dados_lt, txt_pag, img_bytes, ds_keys, ant_keys)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         executor.map(_carregar, proximos_indices)
@@ -415,7 +456,7 @@ def run():
     """
     st.markdown(css_code, unsafe_allow_html=True)
 
-    api_keys = obter_api_keys()
+    ds_keys, ant_keys = obter_api_keys()
 
     with st.sidebar:
         st.header("Arquivos - Modo Catálogo")
@@ -455,36 +496,34 @@ def run():
 
     col_prev, col_next = st.columns(2)
     with col_prev:
-        if st.button("ANTERIOR", use_container_width=True, key="prev_cat"):
+        if st.button("ANTERIOR", use_container_width=True, key="btn_prev_cat"):
             st.session_state.lote_idx_cat = max(0, st.session_state.lote_idx_cat - 1)
             st.rerun()
 
     with col_next:
-        if st.button("PRÓXIMO", use_container_width=True, key="next_cat"):
+        if st.button("PRÓXIMO", use_container_width=True, key="btn_next_cat"):
             st.session_state.lote_idx_cat = min(len(lista_lotes) - 1, st.session_state.lote_idx_cat + 1)
             st.rerun()
 
-    # CALLBACK PARA GARANTIR QUE O SELETOOR MANTENHA O LOTE ESCOLHIDO SEMPRE PERSISTENTE
-    def ao_mudar_lote_cat():
-        if "sel_cat_widget" in st.session_state and st.session_state.sel_cat_widget in lista_lotes:
-            st.session_state.lote_idx_cat = lista_lotes.index(st.session_state.sel_cat_widget)
+    def ao_mudar_selectbox_lote():
+        novo_lote = st.session_state.widget_lote_cat_select
+        if novo_lote in lista_lotes:
+            st.session_state.lote_idx_cat = lista_lotes.index(novo_lote)
 
     st.selectbox(
         "Ir para o lote:",
         options=lista_lotes,
         index=st.session_state.lote_idx_cat,
-        key="sel_cat_widget",
-        on_change=ao_mudar_lote_cat
+        key="widget_lote_cat_select",
+        on_change=ao_mudar_selectbox_lote
     )
 
     num_lote = lista_lotes[st.session_state.lote_idx_cat]
     dados_lote_oe = mapa_oe.get(num_lote, {})
 
-    # Auto-detecta página do catálogo por Número do Lote ou Nome do Animal
     nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
     pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
-    # Controle de Página Isolado por Lote no Session State
     col_esquerda, col_direita = st.columns([1, 1])
 
     with col_direita:
@@ -494,16 +533,16 @@ def run():
             col_cat_title, col_cat_num = st.columns([2, 1])
             pag_sugerida = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
 
-            key_pag_persistencia = f"pag_cat_state_{num_lote}"
-            if key_pag_persistencia not in st.session_state:
-                st.session_state[key_pag_persistencia] = pag_sugerida
+            state_pag_key = f"state_pagina_cat_lote_{num_lote}"
+            if state_pag_key not in st.session_state:
+                st.session_state[state_pag_key] = pag_sugerida
 
             with col_cat_num:
                 pag_input = st.number_input(
                     "Página do Catálogo:",
                     min_value=1,
                     max_value=total_paginas_cat,
-                    key=key_pag_persistencia
+                    key=state_pag_key
                 )
                 pag_selecionada = pag_input - 1
 
@@ -511,15 +550,14 @@ def run():
                 st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
 
             if pagina_detectada < 0:
-                st.info(f"💡 Página do Lote {num_lote} não localizada automaticamente pelo texto. Ajuste a página no campo acima se necessário.")
+                st.info(f"💡 Página do Lote {num_lote} não localizada pelo texto. Ajuste a página no campo acima se necessário.")
 
-    # Pega o texto e imagem da página selecionada
     texto_pagina_catalogo = texto_cat[pag_selecionada] if (texto_cat and 0 <= pag_selecionada < len(texto_cat)) else ""
     img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada) if (file_bytes_cat and pag_selecionada >= 0) else None
 
     with col_esquerda:
-        with st.spinner("🤖 Leiloeiro IA cruzando Ordem + Catálogo..."):
-            dados_ia, erro_ia = analisar_lote_catalogo_deepseek(num_lote, dados_lote_oe, texto_pagina_catalogo, api_keys)
+        with st.spinner("🤖 Claude (Visão) + DeepSeek (Texto) processando o lote..."):
+            dados_ia, erro_ia = analisar_lote_catalogo_hybrid(num_lote, dados_lote_oe, texto_pagina_catalogo, img_pagina_bytes, ds_keys, ant_keys)
 
         if dados_ia:
             lote_texto = f"LOTE {num_lote}"
@@ -563,7 +601,6 @@ def run():
                 st.markdown(f'<div class="gatilho-card">🔥 {g}</div>', unsafe_allow_html=True)
 
     with col_direita:
-        # 1. CONSIDERAÇÕES DO LEILOEIRO (IA)
         if dados_ia:
             canta_html = f"📌 **APRESENTAÇÃO:** {dados_ia.get('apresentacao', '')}<br><br>"
             if dados_ia.get('genetica_pai'): canta_html += f"🐂 **GENÉTICA DO PAI:** {dados_ia.get('genetica_pai')}<br><br>"
@@ -580,7 +617,6 @@ def run():
         elif erro_ia:
             st.error(erro_ia)
 
-        # 2. O.E. (DADOS DIRETOS DA ORDEM DE ENTRADA)
         linha_ctx = dados_lote_oe.get('linha_contextualizada', '')
         if linha_ctx:
             itens = linha_ctx.split(' | ')
@@ -595,20 +631,19 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-        # 3. PREVIEW VISUAL E TEXTO DA PÁGINA SELECIONADA
         if file_bytes_cat:
             if mostrar_preview and img_pagina_bytes:
                 st.image(img_pagina_bytes, use_container_width=True)
 
-            if texto_pagina_catalogo:
+            txt_exibir = dados_ia.get("texto_ocr_claude") if dados_ia and dados_ia.get("texto_ocr_claude") else texto_pagina_catalogo
+            if txt_exibir:
                 st.markdown(f'''
                 <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
-                    <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO EXTRAÍDO DA PÁGINA {pag_selecionada + 1}</h3>
-                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{texto_pagina_catalogo[:1500]}</div>
+                    <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO TRANCRITO (CLAUDE OCR / PDF) - PÁGINA {pag_selecionada + 1}</h3>
+                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{txt_exibir[:1500]}</div>
                 </div>
                 ''', unsafe_allow_html=True)
         else:
             st.warning("⚠️ Envie o arquivo PDF do Catálogo no menu lateral para visualizar as páginas.")
 
-    # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
-    precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, api_keys)
+    precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, file_bytes_cat, ds_keys, ant_keys)
