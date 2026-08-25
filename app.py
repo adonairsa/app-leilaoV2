@@ -1,6 +1,4 @@
 import streamlit as st
-import leilao_catalogo
-import leilao_ordem
 
 st.set_page_config(
     page_title="PAINEL DO LEILOEIRO PRO",
@@ -9,9 +7,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Importação segura para evitar erros caso os arquivos não estejam na raiz
+try:
+    import leilao_catalogo
+except ModuleNotFoundError:
+    leilao_catalogo = None
+
+try:
+    import leilao_ordem
+except ModuleNotFoundError:
+    leilao_ordem = None
+
 if "tela_ativa" not in st.session_state:
     st.session_state.tela_ativa = "menu"
 
+# ==================== TELA PRINCIPAL (MENU) ====================
 if st.session_state.tela_ativa == "menu":
     st.markdown("""
     <style>
@@ -50,6 +60,7 @@ if st.session_state.tela_ativa == "menu":
             st.session_state.tela_ativa = "ordem"
             st.rerun()
 
+# ==================== MÓDULOS SELECIONADOS ====================
 else:
     with st.sidebar:
         if st.button("⬅️ VOLTAR AO MENU INICIAL", use_container_width=True):
@@ -58,6 +69,13 @@ else:
         st.markdown("---")
 
     if st.session_state.tela_ativa == "catalogo":
-        leilao_catalogo.run()
+        if leilao_catalogo:
+            leilao_catalogo.run()
+        else:
+            st.error("⚠️ O arquivo 'leilao_catalogo.py' não foi encontrado na pasta principal (raiz) do repositório no GitHub.")
+            
     elif st.session_state.tela_ativa == "ordem":
-        leilao_ordem.run()
+        if leilao_ordem:
+            leilao_ordem.run()
+        else:
+            st.error("⚠️ O arquivo 'leilao_ordem.py' não foi encontrado na pasta principal (raiz) do repositório no GitHub.")
