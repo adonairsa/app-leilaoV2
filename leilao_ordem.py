@@ -9,20 +9,27 @@ from io import BytesIO
 def obter_api_keys():
     chaves = []
     try:
-        if "GEMINI_API_KEYS" in st.secrets:
-            raw_keys = str(st.secrets["GEMINI_API_KEYS"])
-            chaves = [k.strip().strip('"').strip("'") for k in raw_keys.split(",") if k.strip()]
-        elif "GEMINI_API_KEY" in st.secrets:
-            chaves = [str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")]
+        raw = st.secrets.get("GEMINI_API_KEYS") or st.secrets.get("GEMINI_API_KEY")
+        if raw:
+            if isinstance(raw, (list, tuple)):
+                chaves = [str(k) for k in raw]
+            else:
+                chaves = str(raw).split(",")
     except:
         pass
         
     if not chaves:
         env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
         if env_keys:
-            chaves = [k.strip().strip('"').strip("'") for k in env_keys.split(",") if k.strip()]
+            chaves = env_keys.split(",")
             
-    return chaves
+    chaves_limpas = []
+    for c in chaves:
+        c_clean = re.sub(r"[\[\]'\" \n\r\t]", "", str(c))
+        if c_clean:
+            chaves_limpas.append(c_clean)
+            
+    return chaves_limpas
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
