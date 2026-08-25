@@ -9,7 +9,7 @@ from io import BytesIO
 def obter_api_keys():
     chaves_brutas = []
     try:
-        for secret_name in ["GEMINI_API_KEYS", "GEMINI_API_KEY", "OPENAI_API_KEY"]:
+        for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
             if secret_name in st.secrets:
                 val = st.secrets[secret_name]
                 if isinstance(val, (list, tuple)):
@@ -20,7 +20,7 @@ def obter_api_keys():
         pass
 
     if not chaves_brutas:
-        env_val = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
+        env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
         if env_val:
             chaves_brutas.extend(env_val.split(","))
 
@@ -161,11 +161,10 @@ def extrair_dados_oe(texto_oe_tuple):
     return sequencia, dados_por_lote
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
+def analisar_lote_unificado_deepseek(num_lote, dados_lote, api_keys):
     if not api_keys:
-        return "⚠️ Nenhuma chave GEMINI_API_KEY válida foi encontrada nos Secrets.", []
+        return "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit.", []
 
-    headers = {"Content-Type": "application/json"}
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio.
     Analise os dados da ORDEM DE ENTRADA do LOTE {num_lote}:
@@ -181,7 +180,7 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     2. É PROIBIDO dizer que faltam informações. Oculte tópicos sem dados e exalte o que tem na tela.
     3. Seja ULTRA-DIRETO. Frases curtas.
 
-    Gere a resposta EXATAMENTE neste formato (não mude as marcações):
+    Gere a resposta EXATAMENTE neste formato:
 
     📌 **APRESENTAÇÃO DO LOTE**
     [Venda agressiva exaltando os pontos fortes em 1 frase]
@@ -201,19 +200,28 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
     [Gatilho de canta curto 3 desenhado para o lote]
     """
 
-    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    # Modelo 1.5-flash mantido exclusivamente para garantir suporte universal com API Key
-    mod = "gemini-1.5-flash"
+    url = "https://api.deepseek.com/chat/completions"
     erros = []
 
     for api_key in api_keys:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "Você é um especialista em leilões agropecuários."},
+                {"role": "user", "content": prompt_text}
+            ],
+            "temperature": 0.3
+        }
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=20)
             res_json = response.json()
             
-            if response.status_code == 200 and 'candidates' in res_json:
-                resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+            if response.status_code == 200 and 'choices' in res_json:
+                resposta_completa = res_json['choices'][0]['message']['content']
                 if "---GATILHOS---" in resposta_completa:
                     partes = resposta_completa.split("---GATILHOS---")
                     consideracoes = partes[0].strip()
@@ -223,10 +231,7 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
                     return resposta_completa.strip(), []
             
             msg_erro = res_json.get('error', {}).get('message', response.text)
-            if response.status_code in [401, 403] or "invalid authentication" in msg_erro.lower():
-                erros.append(f"Chave ...{api_key[-6:]}: Gerada fora do AI Studio ou sem permissão.")
-            else:
-                erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
+            erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
 
             if response.status_code == 429:
                 time.sleep(1)
@@ -236,8 +241,8 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
             erros.append(f"Erro na conexão: {str(e)}")
             continue
 
-    detalhe_erro = erros[-1] if erros else "Chave inválida ou recusada pelo Google."
-    return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
+    detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
+    return f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
@@ -363,8 +368,8 @@ def run():
             st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
 
     with col_direita:
-        with st.spinner("🤖 Gemini elaborando a canta e os gatilhos..."):
-            analise_ia, gatilhos_ia = analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys)
+        with st.spinner("🤖 DeepSeek elaborando a canta e os gatilhos..."):
+            analise_ia, gatilhos_ia = analisar_lote_unificado_deepseek(num_lote, dados_lote, api_keys)
             
             st.markdown(f'''
             <div class="ai-consideracoes-box">
