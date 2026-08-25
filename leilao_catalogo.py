@@ -14,30 +14,31 @@ def obter_api_keys():
     chaves_anthropic = []
     
     try:
-        for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
-            if secret_name in st.secrets:
-                val = st.secrets[secret_name]
-                if isinstance(val, (list, tuple)): chaves_deepseek.extend(val)
-                elif isinstance(val, str): chaves_deepseek.extend(val.split(","))
-                
-        for secret_name in ["ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]:
-            if secret_name in st.secrets:
-                val = st.secrets[secret_name]
-                if isinstance(val, (list, tuple)): chaves_anthropic.extend(val)
-                elif isinstance(val, str): chaves_anthropic.extend(val.split(","))
-    except Exception:
-        pass
+        if hasattr(st, "secrets"):
+            for secret_name in ["DEEPSEEK_API_KEY", "DEEPSEEK_API_KEYS"]:
+                if secret_name in st.secrets:
+                    val = st.secrets[secret_name]
+                    if isinstance(val, (list, tuple)): chaves_deepseek.extend(val)
+                    elif isinstance(val, str): chaves_deepseek.extend(val.split(","))
+                    
+            for secret_name in ["ANTHROPIC_API_KEY", "ANTHROPIC_API_KEYS", "CLAUDE_API_KEY"]:
+                if secret_name in st.secrets:
+                    val = st.secrets[secret_name]
+                    if isinstance(val, (list, tuple)): chaves_anthropic.extend(val)
+                    elif isinstance(val, str): chaves_anthropic.extend(val.split(","))
+    except Exception as e:
+        st.sidebar.error(f"⚠️ Erro ao ler Secrets (Sintaxe TOML?): {str(e)}")
 
     if not chaves_deepseek:
-        env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
+        env_val = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEYS") or ""
         if env_val: chaves_deepseek.extend(env_val.split(","))
 
     if not chaves_anthropic:
-        env_val = os.environ.get("ANTHROPIC_API_KEYS") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY") or ""
+        env_val = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEYS") or os.environ.get("CLAUDE_API_KEY") or ""
         if env_val: chaves_anthropic.extend(env_val.split(","))
 
-    clean_ds = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_deepseek if str(x).strip()]
-    clean_ant = [re.sub(r"[\[\]'\" \n\r\t]", "", str(x)).strip() for x in chaves_anthropic if str(x).strip()]
+    clean_ds = [str(x).strip().strip("'\"") for x in chaves_deepseek if str(x).strip()]
+    clean_ant = [str(x).strip().strip("'\"") for x in chaves_anthropic if str(x).strip()]
 
     return clean_ds, clean_ant
 
