@@ -293,12 +293,7 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
 
 # ==================== CLAUDE INDEXA UMA PÁGINA DO CATÁLOGO ====================
 def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
-    """Lê uma página (imagem) do catálogo e retorna os dados estruturados do lote,
-    já em JSON. Usado pra construir o índice completo do catálogo uma única vez.
-    Retorna (dados, erro) — erro é None quando deu tudo certo."""
-    if not img_bytes:
-        return None
-    if not ant_keys:
+    if not img_bytes or not ant_keys:
         return None
 
     base64_image = base64.b64encode(img_bytes).decode('utf-8')
@@ -380,5 +375,4 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
             if response.status_code == 200 and 'content' in res_json:
                 txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
                 texto = "\n".join(txt_parts).strip()
-                # remove possíveis blocos ```json
-                texto = re.sub(r"^
+                texto = re.sub(r"^```json|
