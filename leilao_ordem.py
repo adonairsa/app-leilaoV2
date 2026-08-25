@@ -35,188 +35,172 @@ def obter_api_keys():
     return chaves_limpas
 
 @st.cache_data(ttl=7200, show_spinner=False)
-def processar_pdf(file_bytes):
-    paginas = []
+def extrair_dados_oe_pdf(file_bytes):
+    sequencia = []
+    dados_por_lote = {}
+
     if not file_bytes:
-        return paginas
+        return sequencia, dados_por_lote
+
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                texto = page.extract_text(layout=True) or page.extract_text()
-                if texto:
-                    paginas.append(texto)
+                tables = page.extract_tables()
+                table_success = False
+
+                if tables:
+                    for table in tables:
+                        col_map = {}
+                        for row in table:
+                            if not row:
+                                continue
+                            clean_row = [re.sub(r"\s+", " ", str(cell or "")).strip() for cell in row]
+                            
+                            if not any(clean_row) or "PROGRAMA" in " ".join(clean_row).upper():
+                                continue
+
+                            row_str_upper = " ".join(clean_row).upper()
+
+                            # Identifica e mapeia colunas pelo cabeçalho
+                            if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
+                                col_map = {}
+                                for idx, cell in enumerate(clean_row):
+                                    c_u = cell.upper()
+                                    if re.search(r"\bO\.?E\.?\b", c_u) or "ORDEM" in c_u or "POSIÇ" in c_u:
+                                        col_map["oe"] = idx
+                                    elif re.search(r"\b(LT|LOTE)\b", c_u):
+                                        col_map["lote"] = idx
+                                    elif "QTD" in c_u or "QUANT" in c_u:
+                                        col_map["qtd"] = idx
+                                    elif "IDADE" in c_u:
+                                        col_map["idade"] = idx
+                                    elif "PESO" in c_u:
+                                        col_map["peso"] = idx
+                                    elif "CATEGORIA" in c_u:
+                                        col_map["categoria"] = idx
+                                    elif "PELAGEM" in c_u:
+                                        col_map["pelagem"] = idx
+                                    elif "PRODUTO" in c_u or "ANIMAL" in c_u:
+                                        col_map["produto"] = idx
+                                    elif "VENDEDOR" in c_u or "PROPRIET" in c_u:
+                                        col_map["vendedor"] = idx
+                                continue
+
+                            lt_col = col_map.get("lote", 1 if len(clean_row) > 1 else 0)
+                            raw_lt = clean_row[lt_col] if lt_col < len(clean_row) else ""
+                            clean_lt = re.sub(r"\D", "", raw_lt)
+
+                            if not clean_lt:
+                                for idx in [1, 0, 2]:
+                                    if idx < len(clean_row):
+                                        val = re.sub(r"\D", "", clean_row[idx])
+                                        if val and 1 <= int(val) <= 999:
+                                            clean_lt = val
+                                            break
+
+                            if clean_lt and clean_lt.isdigit():
+                                numero_lote = int(clean_lt)
+                                lt_num = f"{numero_lote:02d}"
+
+                                oe_col = col_map.get("oe", 0)
+                                raw_oe = clean_row[oe_col] if oe_col < len(clean_row) else ""
+                                clean_oe = re.sub(r"\D", "", raw_oe)
+                                posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else (raw_oe if raw_oe else f"{len(sequencia)+1}º A ENTRAR")
+
+                                def get_val(key):
+                                    return clean_row[col_map[key]] if key in col_map and col_map[key] < len(clean_row) else ""
+
+                                qtd = get_val("qtd")
+                                idade = get_val("idade")
+                                peso = get_val("peso")
+                                categoria = get_val("categoria")
+                                pelagem = get_val("pelagem")
+                                produto = get_val("produto")
+                                vendedor = get_val("vendedor")
+
+                                if not produto:
+                                    if len(clean_row) == 6:
+                                        categoria = categoria or clean_row[2]
+                                        pelagem = pelagem or clean_row[3]
+                                        produto = clean_row[4]
+                                        vendedor = vendedor or clean_row[5]
+                                    elif len(clean_row) == 8:
+                                        produto = clean_row[6]
+                                        vendedor = vendedor or clean_row[7]
+
+                                nome_animal = produto
+                                porcentagem_venda = ""
+                                m_perc = re.search(r"(\d+%)\s*de:\s*(.+)", produto, re.IGNORECASE)
+                                if m_perc:
+                                    porcentagem_venda = m_perc.group(1)
+                                    nome_animal = m_perc.group(2).strip()
+
+                                info_repro, tipo_repro = "", ""
+                                m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", f"{categoria} {produto}", re.IGNORECASE)
+                                if m_repro:
+                                    info_repro = m_repro.group(0).strip()
+                                    txt_low = info_repro.lower()
+                                    if "parida" in txt_low: tipo_repro = "parida"
+                                    elif "prenh" in txt_low: tipo_repro = "prenhez"
+                                    elif "inseminada" in txt_low: tipo_repro = "inseminacao"
+
+                                if lt_num not in sequencia:
+                                    sequencia.append(lt_num)
+
+                                dados_por_lote[lt_num] = {
+                                    "lote": lt_num,
+                                    "posicao": posicao_fmt,
+                                    "qtd": qtd,
+                                    "idade": idade,
+                                    "peso": peso,
+                                    "categoria": categoria,
+                                    "pelagem": pelagem,
+                                    "produto": produto,
+                                    "nome_animal": nome_animal,
+                                    "porcentagem_venda": porcentagem_venda,
+                                    "vendedor": vendedor,
+                                    "info_reproducao": info_repro,
+                                    "tipo_reproducao": tipo_repro,
+                                    "linha_completa": " | ".join([c for c in clean_row if c])
+                                }
+                                table_success = True
+
+                # Contingência para texto simples caso não seja tabela PDF delimitada
+                if not table_success:
+                    texto = page.extract_text(layout=True) or page.extract_text() or ""
+                    if texto:
+                        for linha in texto.split('\n'):
+                            linha_limpa = linha.strip()
+                            if not linha_limpa or "PROGRAMA" in linha_limpa.upper():
+                                continue
+
+                            m_pos = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
+                            if m_pos:
+                                pos_num = int(m_pos.group(1))
+                                num_lote = int(m_pos.group(2))
+                                if 1 <= num_lote <= 999:
+                                    lt_num = f"{num_lote:02d}"
+                                    if lt_num not in sequencia:
+                                        sequencia.append(lt_num)
+                                    restante = linha_limpa[m_pos.end():].strip().split()
+                                    
+                                    dados_por_lote[lt_num] = {
+                                        "lote": lt_num,
+                                        "posicao": f"{pos_num}º A ENTRAR",
+                                        "qtd": restante[0] if len(restante)>0 else "",
+                                        "idade": restante[1] if len(restante)>1 else "",
+                                        "peso": restante[2] if len(restante)>2 else "",
+                                        "categoria": restante[3] if len(restante)>3 else "",
+                                        "pelagem": "",
+                                        "produto": " ".join(restante[4:-1]) if len(restante)>5 else (restante[4] if len(restante)>4 else ""),
+                                        "vendedor": restante[-1] if len(restante)>4 else "",
+                                        "info_reproducao": "", "tipo_reproducao": "",
+                                        "nome_animal": " ".join(restante[4:-1]) if len(restante)>5 else "",
+                                        "porcentagem_venda": "", "linha_completa": linha_limpa
+                                    }
     except Exception as e:
-        st.error(f"Erro ao processar PDF: {str(e)}")
-    return paginas
+        st.error(f"Erro ao extrair PDF: {str(e)}")
 
-@st.cache_data
-def extrair_dados_oe(texto_oe_tuple):
-    texto_oe = list(texto_oe_tuple)
-    sequencia = []
-    dados_por_lote = {}
-    
-    if not texto_oe:
-        return sequencia, dados_por_lote
-    
-    for pagina in texto_oe:
-        linhas = pagina.split('\n')
-        col_map = {}
-        
-        for linha in linhas:
-            linha_limpa = linha.strip()
-            if not linha_limpa or "PROGRAMA" in linha_limpa.upper():
-                continue
-
-            # 1. Identifica a linha de cabeçalho e mapeia o índice exato de cada coluna
-            if any(h in linha_limpa.upper() for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
-                if '|' in linha_limpa:
-                    raw_headers = [h.strip().upper() for h in linha_limpa.split('|')]
-                    if raw_headers and raw_headers[0] == '': raw_headers.pop(0)
-                    if raw_headers and raw_headers[-1] == '': raw_headers.pop()
-                else:
-                    raw_headers = [h.strip().upper() for h in re.split(r'\s{2,}', linha_limpa) if h.strip()]
-                
-                col_map = {}
-                for idx, h in enumerate(raw_headers):
-                    if re.search(r"\bO\.?E\.?\b", h) or "ORDEM" in h or "POSIÇ" in h:
-                        col_map["oe"] = idx
-                    elif re.search(r"\b(LT|LOTE)\b", h):
-                        col_map["lote"] = idx
-                    elif "QTD" in h or "QUANT" in h:
-                        col_map["qtd"] = idx
-                    elif "IDADE" in h:
-                        col_map["idade"] = idx
-                    elif "PESO" in h:
-                        col_map["peso"] = idx
-                    elif "CATEGORIA" in h:
-                        col_map["categoria"] = idx
-                    elif "PELAGEM" in h:
-                        col_map["pelagem"] = idx
-                    elif "PRODUTO" in h or "ANIMAL" in h:
-                        col_map["produto"] = idx
-                    elif "VENDEDOR" in h or "PROPRIET" in h:
-                        col_map["vendedor"] = idx
-                continue
-
-            # 2. Processa a linha de dados mantendo as células vazias
-            if '|' in linha_limpa:
-                parts = [p.strip() for p in linha_limpa.split('|')]
-                if parts and parts[0] == '': parts.pop(0)
-                if parts and parts[-1] == '': parts.pop()
-                
-                if len(parts) >= 2:
-                    oe_idx = col_map.get("oe", 0)
-                    lt_idx = col_map.get("lote", 1 if len(parts) > 1 else 0)
-                    
-                    raw_oe = parts[oe_idx] if oe_idx < len(parts) else parts[0]
-                    raw_lt = parts[lt_idx] if lt_idx < len(parts) else (parts[1] if len(parts) > 1 else parts[0])
-                    
-                    clean_oe = re.sub(r"\D", "", raw_oe)
-                    clean_lt = re.sub(r"\D", "", raw_lt)
-
-                    if clean_lt and clean_lt.isdigit():
-                        numero_lote = int(clean_lt)
-                        lt_num = f"{numero_lote:02d}"
-                        posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else raw_oe
-                        
-                        if lt_num not in sequencia:
-                            sequencia.append(lt_num)
-
-                        def get_val(key):
-                            return parts[col_map[key]] if key in col_map and col_map[key] < len(parts) else ""
-
-                        qtd = get_val("qtd")
-                        idade = get_val("idade")
-                        peso = get_val("peso")
-                        categoria = get_val("categoria")
-                        pelagem = get_val("pelagem")
-                        produto = get_val("produto")
-                        vendedor = get_val("vendedor")
-
-                        if not produto and len(parts) > 3:
-                            produto = parts[-2]
-
-                        nome_animal = produto
-                        porcentagem_venda = ""
-                        m_porcentagem = re.search(r"(\d+%)\s*de:\s*(.+)", produto, re.IGNORECASE)
-                        if m_porcentagem:
-                            porcentagem_venda = m_porcentagem.group(1)
-                            nome_animal = m_porcentagem.group(2).strip()
-
-                        info_repro, tipo_repro = "", ""
-                        m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", f"{categoria} {produto}", re.IGNORECASE)
-                        if m_repro:
-                            info_repro = m_repro.group(0).strip()
-                            txt_low = info_repro.lower()
-                            if "parida" in txt_low: tipo_repro = "parida"
-                            elif "prenh" in txt_low: tipo_repro = "prenhez"
-                            elif "inseminada" in txt_low: tipo_repro = "inseminacao"
-
-                        dados_por_lote[lt_num] = {
-                            "lote": lt_num,
-                            "posicao": posicao_fmt,
-                            "qtd": qtd,
-                            "idade": idade,
-                            "peso": peso,
-                            "categoria": categoria,
-                            "pelagem": pelagem,
-                            "produto": produto,
-                            "nome_animal": nome_animal,
-                            "porcentagem_venda": porcentagem_venda,
-                            "vendedor": vendedor,
-                            "info_reproducao": info_repro,
-                            "tipo_reproducao": tipo_repro,
-                            "linha_completa": linha_limpa
-                        }
-                        continue
-
-            # 3. Processamento de contingência para texto corrido sem separador '|'
-            m_pos = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
-            if m_pos:
-                pos_num = int(m_pos.group(1))
-                numero_lote = int(m_pos.group(2))
-                if 1 <= numero_lote <= 999:
-                    lt_num = f"{numero_lote:02d}"
-                    if lt_num not in sequencia:
-                        sequencia.append(lt_num)
-                    
-                    restante = linha_limpa[m_pos.end():].strip()
-                    parts = restante.split()
-                    
-                    dados = {
-                        "lote": lt_num,
-                        "posicao": f"{pos_num}º A ENTRAR",
-                        "qtd": parts[0] if len(parts)>0 else "",
-                        "idade": parts[1] if len(parts)>1 else "",
-                        "peso": parts[2] if len(parts)>2 else "",
-                        "categoria": parts[3] if len(parts)>3 else "",
-                        "pelagem": "",
-                        "produto": " ".join(parts[4:-1]) if len(parts)>5 else (parts[4] if len(parts)>4 else ""),
-                        "vendedor": parts[-1] if len(parts)>4 else "",
-                        "info_reproducao": "",
-                        "tipo_reproducao": "",
-                        "nome_animal": "",
-                        "porcentagem_venda": "",
-                        "linha_completa": linha_limpa
-                    }
-                    
-                    m_porcentagem = re.search(r"(\d+%)\s*de:\s*(.+?)(?=\s+(?:parida|prenhe|prenha|inseminada|nelore|angus|girolando)|\s*$)", linha_limpa, re.IGNORECASE)
-                    if m_porcentagem:
-                        dados["porcentagem_venda"] = m_porcentagem.group(1)
-                        dados["nome_animal"] = m_porcentagem.group(2).strip()
-                    else:
-                        dados["nome_animal"] = dados["produto"]
-                        
-                    m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", linha_limpa, re.IGNORECASE)
-                    if m_repro:
-                        texto_repro = m_repro.group(0).strip()
-                        dados["info_reproducao"] = texto_repro
-                        txt_low = texto_repro.lower()
-                        if "parida" in txt_low: dados["tipo_reproducao"] = "parida"
-                        elif "prenh" in txt_low: dados["tipo_reproducao"] = "prenhez"
-                        elif "inseminada" in txt_low: dados["tipo_reproducao"] = "inseminacao"
-                        
-                    dados_por_lote[lt_num] = dados
     return sequencia, dados_por_lote
 
 @st.cache_data(show_spinner=False)
@@ -225,10 +209,10 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler as informações de um lote de leilão (gado Nelore/Corte/Leite ou Equinos Quarto de Milha/Crioulo) e organizar a apresentação visual para a tela do leiloeiro na pista."""
+    Sua missão é ler as informações de um lote de leilão e organizar a apresentação visual para a tela do leiloeiro na pista."""
 
     prompt_user = f"""
-    Analise os dados extraídos do LOTE {num_lote}:
+    Analise os dados do LOTE {num_lote}:
     - Posição de Entrada: {dados_lote.get('posicao', 'N/A')}
     - Número do Lote: {num_lote}
     - Categoria: {dados_lote.get('categoria', '')}
@@ -339,8 +323,8 @@ def run():
         st.markdown("---")
         modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_somente")
 
-    texto_oe = processar_pdf(file_oe.getvalue()) if file_oe else []
-    sequencia_oe, mapa_oe = extrair_dados_oe(tuple(texto_oe))
+    file_bytes = file_oe.getvalue() if file_oe else None
+    sequencia_oe, mapa_oe = extrair_dados_oe_pdf(file_bytes)
 
     if sequencia_oe:
         lista_lotes = sequencia_oe.copy() if modo_ordenacao == "ORDEM DE ENTRADA" else sorted(sequencia_oe, key=lambda x: int(x))
@@ -405,7 +389,6 @@ def run():
             if dados_ia.get("nome_animal"):
                 st.markdown(f'<div class="nome-animal-box">🐂 {dados_ia["nome_animal"]}</div>', unsafe_allow_html=True)
 
-            # RENDERIZAÇÃO DINÂMICA DOS ENCARTES GERADOS PELA IA
             encartes = [e for e in dados_ia.get("encartes", []) if e.get("valor") and str(e.get("valor")).strip() not in ["-", "N/A", ""]]
             if encartes:
                 num_encartes = len(encartes)
