@@ -76,24 +76,43 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina):
     return None
 
 @st.cache_data
-def encontrar_pagina_catalogo(texto_cat_tuple, num_lote):
+def encontrar_pagina_catalogo(texto_cat_tuple, num_lote, nome_animal=""):
     texto_cat = list(texto_cat_tuple)
-    if not texto_cat or not num_lote:
+    if not texto_cat:
         return -1, ""
 
-    try:
-        num_clean = int(re.sub(r"\D", "", str(num_lote)))
-    except ValueError:
-        return -1, ""
+    num_clean = re.sub(r"\D", "", str(num_lote or ""))
 
-    # Padrões de busca por relevância
-    padroes = [
-        rf"\b(?:LOTE|LT|L|Nº|NUMERO)[\s:\.\-]*0*{num_clean}\b",
-        rf"\bLOTE\s*0*{num_clean}\b",
-        rf"\b0*{num_clean}\b"
-    ]
+    # 1. Busca por número explícito de lote (LOTE 100, LT 100, LT:100)
+    if num_clean:
+        n_int = int(num_clean)
+        padroes = [
+            rf"\b(?:LOTE|LT|L|Nº|NUMERO)[\s:\.\-]*0*{n_int}\b",
+            rf"\bLOTE\s*0*{n_int}\b"
+        ]
+        for pattern in padroes:
+            for idx, pagina in enumerate(texto_cat):
+                if pagina and re.search(pattern, pagina, re.IGNORECASE):
+                    return idx, pagina
 
-    for pattern in padroes:
+    # 2. Cruzamento Inteligente por palavras do Nome do Animal / Produto (ex: "SIRIGUELA")
+    if nome_animal:
+        ignore_words = {"LIVRE", "ACASALAMENTO", "PRENHEZ", "PRENHA", "PARIDA", "HARAS", "FAZENDA", "OFERTA", "VENDAS", "LEILAO", "LEILÕES", "LOTE"}
+        palavras = [
+            p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ]{4,}\b", nome_animal)
+            if p.upper() not in ignore_words
+        ]
+        
+        if palavras:
+            for idx, pagina in enumerate(texto_cat):
+                if pagina:
+                    pag_upper = pagina.upper()
+                    if any(p in pag_upper for p in palavras):
+                        return idx, pagina
+
+    # 3. Busca por número solto caso as anteriores falhem
+    if num_clean:
+        pattern = rf"\b0*{int(num_clean)}\b"
         for idx, pagina in enumerate(texto_cat):
             if pagina and re.search(pattern, pagina, re.IGNORECASE):
                 return idx, pagina
@@ -375,7 +394,8 @@ def precarregar_proximos_lotes_cat(idx_atual, lista_lotes, mapa_oe, texto_cat, a
     def _carregar(i):
         num_lt = lista_lotes[i]
         dados_lt = mapa_oe.get(num_lt, {})
-        _, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt) if texto_cat else (-1, "")
+        nome_an = dados_lt.get("nome_animal") or dados_lt.get("produto", "")
+        _, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt, nome_an) if texto_cat else (-1, "")
         analisar_lote_catalogo_deepseek(num_lt, dados_lt, txt_pag, api_keys)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
@@ -397,6 +417,7 @@ def run():
         .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
         .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
+        .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; margin-top: 15px; }
     </style>
     """
@@ -457,10 +478,39 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx_cat]
     dados_lote_oe = mapa_oe.get(num_lote, {})
 
-    # Localização de página no catálogo
-    pagina_detectada, texto_pagina_catalogo = encontrar_pagina_catalogo(tuple(texto_cat), num_lote) if texto_cat else (-1, "")
+    # Auto-detecta página do catálogo por Número do Lote ou Nome do Animal
+    nome_an = dados_lote_oe.get("nome_animal") or dados_lote_oe.get("produto", "")
+    pagina_detectada, _ = encontrar_pagina_catalogo(tuple(texto_cat), num_lote, nome_an) if texto_cat else (-1, "")
 
+    # Controle de Página Isolado por Lote
     col_esquerda, col_direita = st.columns([1, 1])
+
+    with col_direita:
+        pag_selecionada = -1
+        if file_bytes_cat:
+            st.markdown("---")
+            col_cat_title, col_cat_num = st.columns([2, 1])
+            pag_sugerida = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
+
+            with col_cat_num:
+                pag_input = st.number_input(
+                    "Página do Catálogo:",
+                    min_value=1,
+                    max_value=total_paginas_cat,
+                    value=pag_sugerida,
+                    key=f"pag_input_num_{num_lote}"
+                )
+                pag_selecionada = pag_input - 1
+
+            with col_cat_title:
+                st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
+
+            if pagina_detectada < 0:
+                st.info(f"💡 Página do Lote {num_lote} não localizada automaticamente pelo texto. Ajuste a página no campo acima se necessário.")
+
+    # Pega o texto e imagem da página selecionada
+    texto_pagina_catalogo = texto_cat[pag_selecionada] if (texto_cat and 0 <= pag_selecionada < len(texto_cat)) else ""
+    img_pagina_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada) if (file_bytes_cat and pag_selecionada >= 0) else None
 
     with col_esquerda:
         with st.spinner("🤖 Leiloeiro IA cruzando Ordem + Catálogo..."):
@@ -540,38 +590,16 @@ def run():
         </div>
         ''', unsafe_allow_html=True)
 
-        # 3. CATÁLOGO (PREVIEW VISUAL E CONTROLE DE PÁGINA)
+        # 3. PREVIEW VISUAL E TEXTO DA PÁGINA SELECIONADA
         if file_bytes_cat:
-            st.markdown("---")
-            col_cat_title, col_cat_num = st.columns([2, 1])
-            
-            pag_default = (pagina_detectada + 1) if pagina_detectada >= 0 else 1
-            with col_cat_num:
-                pag_selecionada = st.number_input(
-                    "Página do Catálogo:",
-                    min_value=1,
-                    max_value=total_paginas_cat,
-                    value=pag_default,
-                    key=f"pag_num_{num_lote}"
-                ) - 1
+            if mostrar_preview and img_pagina_bytes:
+                st.image(img_pagina_bytes, use_container_width=True)
 
-            with col_cat_title:
-                st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pag_selecionada + 1} DE {total_paginas_cat}</div>', unsafe_allow_html=True)
-
-            if pagina_detectada < 0:
-                st.info(f"💡 Página do Lote {num_lote} não localizada automaticamente no texto. Ajuste o número da página no campo acima se necessário.")
-
-            if mostrar_preview:
-                img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pag_selecionada)
-                if img_bytes:
-                    st.image(img_bytes, use_container_width=True)
-
-            txt_pag_exibir = texto_cat[pag_selecionada] if pag_selecionada < len(texto_cat) else ""
-            if txt_pag_exibir:
+            if texto_pagina_catalogo:
                 st.markdown(f'''
                 <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
                     <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO EXTRAÍDO DA PÁGINA {pag_selecionada + 1}</h3>
-                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{txt_pag_exibir[:1500]}</div>
+                    <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{texto_pagina_catalogo[:1500]}</div>
                 </div>
                 ''', unsafe_allow_html=True)
         else:
