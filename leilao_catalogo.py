@@ -3,7 +3,6 @@ import pdfplumber
 import re
 import os
 import requests
-import base64
 from io import BytesIO
 
 def obter_api_key():
@@ -30,27 +29,6 @@ def processar_pdf(file_bytes):
     except Exception as e:
         st.error(f"Erro ao processar PDF: {str(e)}")
     return paginas
-
-@st.cache_data(show_spinner=False)
-def obter_imagem_bytes_pagina(file_bytes, num_pagina):
-    try:
-        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-            if 0 <= num_pagina < len(pdf.pages):
-                img = pdf.pages[num_pagina].to_image(resolution=150).original
-                buffer = BytesIO()
-                img.save(buffer, format="JPEG")
-                return buffer.getvalue()
-    except:
-        return None
-    return None
-
-@st.cache_data
-def encontrar_pagina_catalogo(texto_cat_tuple, num_lote):
-    texto_cat = list(texto_cat_tuple)
-    for idx, pagina in enumerate(texto_cat):
-        if re.search(rf"\b(lote|lt)?\s*0*{int(num_lote)}\b", pagina, re.IGNORECASE):
-            return idx, pagina
-    return -1, ""
 
 @st.cache_data
 def extrair_dados_oe(texto_oe_tuple):
@@ -126,30 +104,8 @@ def extrair_dados_oe(texto_oe_tuple):
                     dados_por_lote[lt_num] = dados
     return sequencia, dados_por_lote
 
-def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
-    if not texto_pagina_cat or not dados_lote:
-        return dados_lote
-    dados_atualizados = dados_lote.copy()
-    if not dados_atualizados.get("info_reproducao"):
-        linhas = texto_pagina_cat.split('\n')
-        for l in linhas:
-            l_clean = l.strip()
-            m_repro = re.search(r"\b(parida|prenhe|prenha|inseminada)\b.*", l_clean, re.IGNORECASE)
-            if m_repro:
-                texto_repro = m_repro.group(0).strip()
-                dados_atualizados["info_reproducao"] = texto_repro
-                txt_low = texto_repro.lower()
-                if "parida" in txt_low:
-                    dados_atualizados["tipo_reproducao"] = "parida"
-                elif "prenh" in txt_low:
-                    dados_atualizados["tipo_reproducao"] = "prenhez"
-                elif "inseminada" in txt_low:
-                    dados_atualizados["tipo_reproducao"] = "inseminacao"
-                break
-    return dados_atualizados
-
 @st.cache_data(show_spinner=False)
-def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_key):
+def analisar_lote_oe_com_gemini(num_lote, dados_lote, api_key):
     if not api_key:
         return "⚠️ Insira a GEMINI_API_KEY nos Secrets do Streamlit."
 
@@ -158,14 +114,16 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
 
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio.
-    Analise o LOTE {num_lote}:
-    - Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
+    Analise a linha inteira de dados da ORDEM DE ENTRADA do LOTE {num_lote}:
+
+    LINHA DE DADOS:
+    {dados_lote.get('linha_completa', '')}
+
+    - Lote: {num_lote}
+    - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
     - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
     - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
-    - Categoria/Peso/Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
-
-    TEXTO DO CATÁLOGO:
-    {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
+    - Categoria / Peso / Idade: {dados_lote.get('categoria', 'N/A')} - {dados_lote.get('peso', 'N/A')} - {dados_lote.get('idade', 'N/A')}
 
     REGRAS CRÍTICAS DE CONTEÚDO E FORMATO:
     - NÃO use saudações (É PROIBIDO escrever 'Boa noite', 'Boa tarde', 'Olá', etc.).
@@ -188,12 +146,7 @@ def analisar_lote_com_gemini(img_bytes, num_lote, dados_lote, texto_pagina_cat, 
     [Status do acasalamento, touro acasalado e previsão em 1 frase].
     """
 
-    parts = [{"text": prompt_text}]
-    if img_bytes:
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
-
-    payload = {"contents": [{"parts": parts}]}
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
     ultimo_erro = ""
 
@@ -239,10 +192,9 @@ def run():
         .banner-venda { background: linear-gradient(135deg, #EAB308 0%, #CA8A04 100%); color: #000000 !important; padding: 16px; border-radius: 14px; margin-bottom: 12px; font-size: 24px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .animal-info { background: #1E293B; color: white; padding: 15px; border-radius: 12px; margin: 5px 0; border: 1px solid #334155; }
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
-        .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #818CF8; }
+        .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 5px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
-        .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; }
     </style>
     """
     st.markdown(css_code, unsafe_allow_html=True)
@@ -250,16 +202,12 @@ def run():
     api_key = obter_api_key()
 
     with st.sidebar:
-        st.header("Arquivos - Modo Catálogo")
-        file_oe = st.file_uploader("Ordem de Entrada (PDF)", type="pdf", key="oe_cat")
-        file_cat = st.file_uploader("Catálogo do Leilão (PDF)", type="pdf", key="cat_cat")
+        st.header("Arquivo - Modo Ordem")
+        file_oe = st.file_uploader("Ordem de Entrada (PDF)", type="pdf", key="oe_somente")
         st.markdown("---")
-        modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_cat")
-        mostrar_preview = st.checkbox("MOSTRAR PREVIEW VISUAL DO CATÁLOGO", value=True)
+        modo_ordenacao = st.radio("Escolha a ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0, key="ordem_somente")
 
     texto_oe = processar_pdf(file_oe.getvalue()) if file_oe else []
-    texto_cat = processar_pdf(file_cat.getvalue()) if file_cat else []
-
     sequencia_oe, mapa_oe = extrair_dados_oe(tuple(texto_oe))
 
     if sequencia_oe:
@@ -269,46 +217,41 @@ def run():
         lista_lotes = []
         ordem_atual = "NENHUM LOTE ENCONTRADO"
 
-    if 'lote_idx_cat' not in st.session_state:
-        st.session_state.lote_idx_cat = 0
+    if 'lote_idx_oe' not in st.session_state:
+        st.session_state.lote_idx_oe = 0
 
     if not lista_lotes:
-        st.warning("Carregue a Ordem de Entrada e o Catálogo em PDF no menu lateral para começar!")
+        st.warning("Carregue a Ordem de Entrada (PDF) no menu lateral para começar!")
         st.stop()
 
-    if st.session_state.lote_idx_cat >= len(lista_lotes):
-        st.session_state.lote_idx_cat = 0
+    if st.session_state.lote_idx_oe >= len(lista_lotes):
+        st.session_state.lote_idx_oe = 0
 
-    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_cat + 1} de {len(lista_lotes)}"
+    ordem_texto = f"{ordem_atual} | Lote {st.session_state.lote_idx_oe + 1} de {len(lista_lotes)}"
     st.markdown(f'<div class="ordem-indicador">{ordem_texto}</div>', unsafe_allow_html=True)
 
     col_prev, col_next = st.columns(2)
     with col_prev:
-        if st.button("ANTERIOR", use_container_width=True, key="prev_cat"):
-            st.session_state.lote_idx_cat = max(0, st.session_state.lote_idx_cat - 1)
+        if st.button("ANTERIOR", use_container_width=True, key="prev_oe"):
+            st.session_state.lote_idx_oe = max(0, st.session_state.lote_idx_oe - 1)
             st.rerun()
 
     with col_next:
-        if st.button("PRÓXIMO", use_container_width=True, key="next_cat"):
-            st.session_state.lote_idx_cat = min(len(lista_lotes) - 1, st.session_state.lote_idx_cat + 1)
+        if st.button("PRÓXIMO", use_container_width=True, key="next_oe"):
+            st.session_state.lote_idx_oe = min(len(lista_lotes) - 1, st.session_state.lote_idx_oe + 1)
             st.rerun()
 
-    lote_selecionado = st.selectbox("Ir para o lote:", options=lista_lotes, index=st.session_state.lote_idx_cat, key="sel_cat")
-    st.session_state.lote_idx_cat = lista_lotes.index(lote_selecionado)
+    lote_selecionado = st.selectbox("Ir para o lote:", options=lista_lotes, index=st.session_state.lote_idx_oe, key="sel_oe")
+    st.session_state.lote_idx_oe = lista_lotes.index(lote_selecionado)
 
-    num_lote = lista_lotes[st.session_state.lote_idx_cat]
-    dados_lote_oe = mapa_oe.get(num_lote, {})
-
-    pagina_catalogo, texto_pagina_catalogo = encontrar_pagina_catalogo(tuple(texto_cat), num_lote) if texto_cat else (-1, "")
-    img_pagina_bytes = obter_imagem_bytes_pagina(file_cat.getvalue(), pagina_catalogo) if (file_cat and pagina_catalogo >= 0) else None
-
-    dados_lote = enriquecer_dados_com_catalogo(dados_lote_oe, texto_pagina_catalogo)
+    num_lote = lista_lotes[st.session_state.lote_idx_oe]
+    dados_lote = mapa_oe.get(num_lote, {})
 
     col_esquerda, col_direita = st.columns([1, 1])
 
     with col_esquerda:
         lote_texto = f"LOTE {num_lote}"
-        posicao_texto = dados_lote.get("posicao", f"{st.session_state.lote_idx_cat + 1}º")
+        posicao_texto = dados_lote.get("posicao", f"{st.session_state.lote_idx_oe + 1}º")
         st.markdown(f'<div class="lote-destaque">{lote_texto}<br><span style="font-size: 24px;">{posicao_texto}</span></div>', unsafe_allow_html=True)
         
         if dados_lote.get("porcentagem_venda"):
@@ -341,16 +284,11 @@ def run():
             st.markdown(f'<div class="gatilho-card">{g}</div>', unsafe_allow_html=True)
 
     with col_direita:
-        if mostrar_preview and img_pagina_bytes:
-            st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pagina_catalogo + 1}</div>', unsafe_allow_html=True)
-            st.image(img_pagina_bytes, use_container_width=True)
-
-        if img_pagina_bytes or texto_pagina_catalogo:
-            with st.spinner("🤖 Gemini analisando a árvore e o acasalamento do lote..."):
-                analise_ia = analisar_lote_com_gemini(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_key)
-                st.markdown(f'''
-                <div class="ai-consideracoes-box">
-                    <h3 style="margin-top:0; color:#818CF8; font-size:18px;">🤖 CONSIDERAÇÕES DA IA (LINHAGEM & REPRODUÇÃO)</h3>
-                    <div>{analise_ia}</div>
-                </div>
-                ''', unsafe_allow_html=True)
+        with st.spinner("🤖 Gemini analisando a linhagem na Ordem de Entrada..."):
+            analise_ia = analisar_lote_oe_com_gemini(num_lote, dados_lote, api_key)
+            st.markdown(f'''
+            <div class="ai-consideracoes-box">
+                <h3 style="margin-top:0; color:#818CF8; font-size:18px;">🤖 CONSIDERAÇÕES DA IA (LINHAGEM & REPRODUÇÃO)</h3>
+                <div>{analise_ia}</div>
+            </div>
+            ''', unsafe_allow_html=True)
