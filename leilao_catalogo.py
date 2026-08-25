@@ -363,13 +363,13 @@ def run():
         .banner-venda { background: linear-gradient(135deg, #EAB308 0%, #CA8A04 100%); color: #000000 !important; padding: 16px; border-radius: 14px; margin-bottom: 12px; font-size: 24px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .animal-info { background: #1E293B; color: white; padding: 15px; border-radius: 12px; margin: 5px 0; border: 1px solid #334155; min-height: 90px; }
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
-        .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #818CF8; }
+        .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 5px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
         .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
         .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
         .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
-        .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; }
+        .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; margin-top: 15px; }
     </style>
     """
     st.markdown(css_code, unsafe_allow_html=True)
@@ -477,10 +477,7 @@ def run():
                 st.markdown(f'<div class="gatilho-card">🔥 {g}</div>', unsafe_allow_html=True)
 
     with col_direita:
-        if mostrar_preview and img_pagina_bytes:
-            st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pagina_catalogo + 1}</div>', unsafe_allow_html=True)
-            st.image(img_pagina_bytes, use_container_width=True)
-
+        # 1. CONSIDERAÇÕES DO LEILOEIRO (IA)
         if dados_ia:
             canta_html = f"📌 **APRESENTAÇÃO:** {dados_ia.get('apresentacao', '')}<br><br>"
             if dados_ia.get('genetica_pai'): canta_html += f"🐂 **GENÉTICA DO PAI:** {dados_ia.get('genetica_pai')}<br><br>"
@@ -497,6 +494,7 @@ def run():
         elif erro_ia:
             st.error(erro_ia)
 
+        # 2. O.E. (DADOS DIRETOS DA ORDEM DE ENTRADA)
         linha_ctx = dados_lote_oe.get('linha_contextualizada', '')
         if linha_ctx:
             itens = linha_ctx.split(' | ')
@@ -510,6 +508,19 @@ def run():
             <div>{oe_formatted}</div>
         </div>
         ''', unsafe_allow_html=True)
+
+        # 3. CATÁLOGO (PREVIEW VISUAL E TEXTO DO CATÁLOGO ABAIXO DA O.E.)
+        if mostrar_preview and img_pagina_bytes:
+            st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO VISUAL - PÁGINA {pagina_catalogo + 1}</div>', unsafe_allow_html=True)
+            st.image(img_pagina_bytes, use_container_width=True)
+
+        if texto_pagina_catalogo:
+            st.markdown(f'''
+            <div class="oe-dados-box" style="border-left: 8px solid #F59E0B; background-color: #1E293B !important;">
+                <h3 style="margin-top:0; color:#F59E0B; font-size:18px;">📖 TEXTO DO CATÁLOGO</h3>
+                <div style="font-size:14px; line-height:1.6; white-space: pre-wrap;">{texto_pagina_catalogo[:1500]}</div>
+            </div>
+            ''', unsafe_allow_html=True)
 
     # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
     precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, api_keys)
