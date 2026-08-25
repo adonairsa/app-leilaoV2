@@ -3,27 +3,35 @@ import pdfplumber
 import re
 import os
 import requests
-import base64
 import time
 from io import BytesIO
 
 def obter_api_keys():
-    chaves = []
+    chaves_brutas = []
     try:
-        if "GEMINI_API_KEYS" in st.secrets:
-            raw_keys = str(st.secrets["GEMINI_API_KEYS"])
-            chaves = [k.strip().strip('"').strip("'") for k in raw_keys.split(",") if k.strip()]
-        elif "GEMINI_API_KEY" in st.secrets:
-            chaves = [str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")]
-    except:
+        for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
+            if secret_name in st.secrets:
+                val = st.secrets[secret_name]
+                if isinstance(val, (list, tuple)):
+                    chaves_brutas.extend(val)
+                elif isinstance(val, str):
+                    chaves_brutas.extend(val.split(","))
+    except Exception:
         pass
-        
-    if not chaves:
-        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
-        if env_keys:
-            chaves = [k.strip().strip('"').strip("'") for k in env_keys.split(",") if k.strip()]
-            
-    return chaves
+
+    if not chaves_brutas:
+        env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
+        if env_val:
+            chaves_brutas.extend(env_val.split(","))
+
+    chaves_limpas = []
+    for item in chaves_brutas:
+        s = str(item).strip()
+        s_clean = re.sub(r"[\[\]'\" \n\r\t]", "", s)
+        if s_clean and s_clean not in chaves_limpas:
+            chaves_limpas.append(s_clean)
+
+    return chaves_limpas
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -196,14 +204,13 @@ def enriquecer_dados_com_catalogo(dados_lote, texto_pagina_cat):
     return dados_atualizados
 
 @st.cache_data(show_spinner=False)
-def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagina_cat, api_keys):
+def analisar_lote_unificado_catalogo(num_lote, dados_lote, texto_pagina_cat, api_keys):
     if not api_keys:
-        return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
+        return "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit.", []
 
-    headers = {"Content-Type": "application/json"}
     prompt_text = f"""
     Você é um zootecnista e leiloeiro de elite no agronegócio (Nelore/Zebu, Equinos Quarto de Milha, etc.).
-    Analise a IMAGEM da página do catálogo e os DADOS extraídos do LOTE {num_lote}:
+    Analise os DADOS extraídos do LOTE {num_lote} e o TEXTO COMPLETO DA PÁGINA DO CATÁLOGO:
 
     DADOS DA ORDEM:
     - Animal/Produto: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
@@ -214,8 +221,8 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
     - Status Reprodutivo: {dados_lote.get('info_reproducao', 'N/A')}
     - Vendedor: {dados_lote.get('vendedor', 'N/A')}
 
-    TEXTO DO CATÁLOGO:
-    {texto_pagina_cat[:1200] if texto_pagina_cat else 'N/A'}
+    TEXTO EXTRAÍDO DO CATÁLOGO:
+    {texto_pagina_cat[:2000] if texto_pagina_cat else 'N/A'}
 
     REGRAS CRÍTICAS:
     1. É PROIBIDO usar saudações (Boa noite, Olá, etc.).
@@ -228,7 +235,7 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
     [Venda agressiva exaltando os pontos fortes em 1 frase]
 
     🐂 **GENÉTICA / PEDIGREE**
-    [Linhagem paterna e materna identificada na imagem/texto em 1 frase]
+    [Linhagem paterna e materna identificada no texto do catálogo em 1 frase]
 
     💉 **REPRODUÇÃO / PRENHEZ**
     [Status reprodutivo ou touro acasalado, se houver]
@@ -239,45 +246,49 @@ def analisar_lote_unificado_catalogo(img_bytes, num_lote, dados_lote, texto_pagi
     [Gatilho de canta curto 3 desenhado para o lote]
     """
 
-    parts = [{"text": prompt_text}]
-    if img_bytes:
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
-
-    payload = {"contents": [{"parts": parts}]}
-    modelos = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    url = "https://api.deepseek.com/chat/completions"
     erros = []
 
-    for mod in modelos:
-        for api_key in api_keys:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
-                res_json = response.json()
-                
-                if response.status_code == 200 and 'candidates' in res_json:
-                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
-                    if "---GATILHOS---" in resposta_completa:
-                        partes = resposta_completa.split("---GATILHOS---")
-                        consideracoes = partes[0].strip()
-                        gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
-                        return consideracoes, gatilhos_limpos[:4]
-                    else:
-                        return resposta_completa.strip(), []
-                
-                msg_erro = res_json.get('error', {}).get('message', response.text)
-                erros.append(f"[{mod}]: {msg_erro}")
+    for api_key in api_keys:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "Você é um especialista em leilões agropecuários."},
+                {"role": "user", "content": prompt_text}
+            ],
+            "temperature": 0.3
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
+            res_json = response.json()
+            
+            if response.status_code == 200 and 'choices' in res_json:
+                resposta_completa = res_json['choices'][0]['message']['content']
+                if "---GATILHOS---" in resposta_completa:
+                    partes = resposta_completa.split("---GATILHOS---")
+                    consideracoes = partes[0].strip()
+                    gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
+                    return consideracoes, gatilhos_limpos[:4]
+                else:
+                    return resposta_completa.strip(), []
+            
+            msg_erro = res_json.get('error', {}).get('message', response.text)
+            erros.append(f"Chave ...{api_key[-6:]}: {msg_erro}")
 
-                if response.status_code == 429:
-                    time.sleep(1)
-                    continue
-                    
-            except Exception as e:
-                erros.append(f"[{mod}]: {str(e)}")
+            if response.status_code == 429:
+                time.sleep(1)
                 continue
+                
+        except Exception as e:
+            erros.append(f"Erro na conexão: {str(e)}")
+            continue
 
-    detalhe_erro = erros[-1] if erros else "Erro desconhecido"
-    return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
+    detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
+    return f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
@@ -418,8 +429,8 @@ def run():
             st.image(img_pagina_bytes, use_container_width=True)
 
         if img_pagina_bytes or texto_pagina_catalogo:
-            with st.spinner("🤖 Gemini elaborando a canta e os gatilhos (Visão + Texto)..."):
-                analise_ia, gatilhos_ia = analisar_lote_unificado_catalogo(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_keys)
+            with st.spinner("🤖 DeepSeek elaborando a canta e os gatilhos..."):
+                analise_ia, gatilhos_ia = analisar_lote_unificado_deepseek(img_pagina_bytes, num_lote, dados_lote, texto_pagina_catalogo, api_keys)
                 
                 if gatilhos_ia:
                     st.markdown("### 🎯 GATILHOS ESPECÍFICOS DO LOTE (IA)")
