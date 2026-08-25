@@ -10,19 +10,19 @@ def obter_api_keys():
     chaves = []
     try:
         if "GEMINI_API_KEYS" in st.secrets:
-            raw_keys = st.secrets["GEMINI_API_KEYS"]
-            chaves = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            raw_keys = str(st.secrets["GEMINI_API_KEYS"])
+            chaves = [k.strip().strip('"').strip("'") for k in raw_keys.split(",") if k.strip()]
         elif "GEMINI_API_KEY" in st.secrets:
-            chaves = [st.secrets["GEMINI_API_KEY"].strip()]
+            chaves = [str(st.secrets["GEMINI_API_KEY"]).strip().strip('"').strip("'")]
     except:
         pass
         
     if not chaves:
-        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY")
+        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
         if env_keys:
-            chaves = [k.strip() for k in env_keys.split(",") if k.strip()]
+            chaves = [k.strip().strip('"').strip("'") for k in env_keys.split(",") if k.strip()]
             
-    return chaves if chaves else [""]
+    return chaves
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf(file_bytes):
@@ -54,7 +54,6 @@ def extrair_dados_oe(texto_oe_tuple):
             if not linha_limpa or re.search(r"QTD\s+IDADE\s+PESO", linha_limpa, re.IGNORECASE) or re.search(r"O\.E\.\s*\|?\s*LT", linha_limpa, re.IGNORECASE) or re.search(r"PROGRAMA\s+LEILÕES", linha_limpa, re.IGNORECASE):
                 continue
             
-            # Formato com separadores '|'
             if '|' in linha_limpa:
                 parts = [p.strip() for p in linha_limpa.split('|') if p.strip()]
                 if len(parts) >= 3:
@@ -67,9 +66,9 @@ def extrair_dados_oe(texto_oe_tuple):
                         
                         qtd, idade, peso, categoria, pelagem, produto, vendedor = "", "", "", "", "", "", ""
                         
-                        if len(parts) == 8: # Ex: Terra Prometida (Pos, Lote, Qtd, Idade, Peso, Cat, Prod, Vend)
+                        if len(parts) == 8:
                             qtd, idade, peso, categoria, produto, vendedor = parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]
-                        elif len(parts) == 6: # Ex: Ratto (Pos, Lote, Cat, Pelagem, Prod, Vend)
+                        elif len(parts) == 6:
                             categoria, pelagem, produto, vendedor = parts[2], parts[3], parts[4], parts[5]
                         else:
                             categoria = parts[2] if len(parts) > 2 else ""
@@ -108,7 +107,6 @@ def extrair_dados_oe(texto_oe_tuple):
                         }
                         continue
 
-            # Formato padrão separado por espaços
             m_posicao = re.match(r"^(\d{1,3})\s*[º°]?\s+(\d{1,3})\s+", linha_limpa)
             if m_posicao:
                 posicao = int(m_posicao.group(1))
@@ -155,7 +153,7 @@ def extrair_dados_oe(texto_oe_tuple):
 
 @st.cache_data(show_spinner=False)
 def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
-    if not api_keys or api_keys[0] == "":
+    if not api_keys:
         return "⚠️ Insira a GEMINI_API_KEYS nos Secrets do Streamlit.", []
 
     headers = {"Content-Type": "application/json"}
@@ -196,50 +194,38 @@ def analisar_lote_unificado_gemini(num_lote, dados_lote, api_keys):
 
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     modelos = ["gemini-1.5-flash", "gemini-1.5-pro"]
-    ultimo_erro = ""
+    erros = []
 
     for mod in modelos:
-        for tentativa in range(2):
-            for api_key in api_keys:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
-                try:
-                    response = requests.post(url, headers=headers, json=payload, timeout=25)
-                    res_json = response.json()
-                    
-                    if response.status_code == 200 and 'candidates' in res_json:
-                        resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
-                        if "---GATILHOS---" in resposta_completa:
-                            partes = resposta_completa.split("---GATILHOS---")
-                            consideracoes = partes[0].strip()
-                            gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
-                            return consideracoes, gatilhos_limpos[:4]
-                        else:
-                            return resposta_completa.strip(), []
-                            
-                    elif response.status_code == 429:
-                        ultimo_erro = "Cota limite alcançada."
-                        continue
-                        
-                    elif response.status_code == 404:
-                        ultimo_erro = f"Modelo {mod} indisponível."
-                        break
-                        
+        for api_key in api_keys:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                res_json = response.json()
+                
+                if response.status_code == 200 and 'candidates' in res_json:
+                    resposta_completa = res_json['candidates'][0]['content']['parts'][0]['text']
+                    if "---GATILHOS---" in resposta_completa:
+                        partes = resposta_completa.split("---GATILHOS---")
+                        consideracoes = partes[0].strip()
+                        gatilhos_limpos = [g.strip('- *123.') for g in partes[1].strip().split('\n') if g.strip()]
+                        return consideracoes, gatilhos_limpos[:4]
                     else:
-                        ultimo_erro = res_json.get('error', {}).get('message', response.text)
-                        continue 
-                        
-                except Exception as e:
-                    ultimo_erro = str(e)
+                        return resposta_completa.strip(), []
+                
+                msg_erro = res_json.get('error', {}).get('message', response.text)
+                erros.append(f"[{mod}]: {msg_erro}")
+
+                if response.status_code == 429:
+                    time.sleep(1)
                     continue
+                    
+            except Exception as e:
+                erros.append(f"[{mod}]: {str(e)}")
+                continue
 
-            if "Cota" in ultimo_erro:
-                time.sleep(5)
-            elif "indisponível" in ultimo_erro:
-                break
-            else:
-                break
-
-    return f"⚠️ Erro de Conexão ou Limite Atingido. Detalhe: {ultimo_erro}", []
+    detalhe_erro = erros[-1] if erros else "Erro desconhecido"
+    return f"⚠️ Erro ao consultar a API. Detalhe: {detalhe_erro}", []
 
 def gerar_gatilhos_padrao(dados_lote):
     gatilhos = []
