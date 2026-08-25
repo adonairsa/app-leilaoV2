@@ -5,6 +5,7 @@ import os
 import requests
 import json
 import time
+import concurrent.futures
 from io import BytesIO
 
 def obter_api_keys():
@@ -86,7 +87,9 @@ def extrair_dados_oe_pdf(file_bytes):
 
                 if tables:
                     for table in tables:
+                        headers_atuais = []
                         col_map = {}
+                        
                         for row in table:
                             if not row:
                                 continue
@@ -97,8 +100,8 @@ def extrair_dados_oe_pdf(file_bytes):
 
                             row_str_upper = " ".join(clean_row).upper()
 
-                            # Identifica e mapeia colunas pelo cabeçalho do PDF
                             if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
+                                headers_atuais = [c if c else f"COLUNA_{i+1}" for i, c in enumerate(clean_row)]
                                 col_map = {}
                                 for idx, cell in enumerate(clean_row):
                                     c_u = cell.upper()
@@ -142,6 +145,13 @@ def extrair_dados_oe_pdf(file_bytes):
                                 raw_oe = clean_row[oe_col] if oe_col < len(clean_row) else ""
                                 clean_oe = re.sub(r"\D", "", raw_oe)
                                 posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else (raw_oe if raw_oe else f"{len(sequencia)+1}º A ENTRAR")
+
+                                pares_rotulados = []
+                                for idx, val in enumerate(clean_row):
+                                    if val:
+                                        nome_col = headers_atuais[idx] if idx < len(headers_atuais) and headers_atuais[idx] else f"CAMPO_{idx+1}"
+                                        pares_rotulados.append(f"{nome_col}: {val}")
+                                linha_contextualizada = " | ".join(pares_rotulados)
 
                                 def get_val(key):
                                     return clean_row[col_map[key]] if key in col_map and col_map[key] < len(clean_row) else ""
@@ -197,11 +207,11 @@ def extrair_dados_oe_pdf(file_bytes):
                                     "vendedor": vendedor,
                                     "info_reproducao": info_repro,
                                     "tipo_reproducao": tipo_repro,
+                                    "linha_contextualizada": linha_contextualizada,
                                     "linha_completa": " | ".join([c for c in clean_row if c])
                                 }
                                 table_success = True
 
-                # Contingência para texto simples caso o PDF não possua tabela vetorial
                 if not table_success:
                     texto = page.extract_text(layout=True) or page.extract_text() or ""
                     if texto:
@@ -232,7 +242,9 @@ def extrair_dados_oe_pdf(file_bytes):
                                         "vendedor": restante[-1] if len(restante)>4 else "",
                                         "info_reproducao": "", "tipo_reproducao": "",
                                         "nome_animal": " ".join(restante[4:-1]) if len(restante)>5 else "",
-                                        "porcentagem_venda": "", "linha_completa": linha_limpa
+                                        "porcentagem_venda": "", 
+                                        "linha_contextualizada": f"LINHA COMPLETA: {linha_limpa}",
+                                        "linha_completa": linha_limpa
                                     }
     except Exception as e:
         st.error(f"Erro ao extrair PDF: {str(e)}")
@@ -249,19 +261,8 @@ def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_
 
     prompt_user = f"""
     Analise o LOTE {num_lote}:
-    DADOS DA ORDEM:
-    - Posição de Entrada: {dados_lote.get('posicao', 'N/A')}
-    - Número do Lote: {num_lote}
-    - Categoria: {dados_lote.get('categoria', '')}
-    - Pelagem: {dados_lote.get('pelagem', '')}
-    - Produto / Animal: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
-    - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Qtd: {dados_lote.get('qtd', '')}
-    - Peso: {dados_lote.get('peso', '')}
-    - Idade: {dados_lote.get('idade', '')}
-    - Status Reprodutivo: {dados_lote.get('info_reproducao', '')}
-    - Vendedor: {dados_lote.get('vendedor', '')}
-    - Linha Bruta Ordem: {dados_lote.get('linha_completa', '')}
+    📍 DADOS DA ORDEM ROTULADOS (CHAVE: VALOR):
+    {dados_lote.get('linha_contextualizada', dados_lote.get('linha_completa', ''))}
 
     TEXTO DO CATÁLOGO DO LOTE:
     {texto_pagina_cat[:2000] if texto_pagina_cat else 'N/A'}
@@ -337,6 +338,20 @@ def analisar_lote_catalogo_deepseek(num_lote, dados_lote, texto_pagina_cat, api_
     detalhe_erro = erros[-1] if erros else "Erro de comunicação com a API DeepSeek."
     return None, f"⚠️ Erro ao consultar o DeepSeek. Detalhe: {detalhe_erro}"
 
+def precarregar_proximos_lotes_cat(idx_atual, lista_lotes, mapa_oe, texto_cat, api_keys):
+    proximos_indices = [idx_atual + i for i in range(1, 4) if (idx_atual + i) < len(lista_lotes)]
+    if not proximos_indices or not api_keys:
+        return
+        
+    def _carregar(i):
+        num_lt = lista_lotes[i]
+        dados_lt = mapa_oe.get(num_lt, {})
+        _, txt_pag = encontrar_pagina_catalogo(tuple(texto_cat), num_lt) if texto_cat else (-1, "")
+        analisar_lote_catalogo_deepseek(num_lt, dados_lt, txt_pag, api_keys)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor.map(_carregar, proximos_indices)
+
 def run():
     css_code = """
     <style>
@@ -350,6 +365,8 @@ def run():
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
         .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
+        .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
+        .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
         .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
         .catalogo-header { background: #F59E0B; color: white; padding: 10px; border-radius: 10px; text-align: center; font-weight: bold; font-size: 18px; }
@@ -476,5 +493,23 @@ def run():
                 <div>{canta_html}</div>
             </div>
             ''', unsafe_allow_html=True)
+
         elif erro_ia:
             st.error(erro_ia)
+
+        linha_ctx = dados_lote_oe.get('linha_contextualizada', '')
+        if linha_ctx:
+            itens = linha_ctx.split(' | ')
+            oe_formatted = "<br>".join([f"• <b>{it.split(':', 1)[0]}:</b> {it.split(':', 1)[1]}" if ':' in it else f"• <b>DADO:</b> {it}" for it in itens])
+        else:
+            oe_formatted = dados_lote_oe.get('linha_completa', 'Nenhum dado encontrado na Ordem.')
+
+        st.markdown(f'''
+        <div class="oe-dados-box">
+            <h3 style="margin-top:0; color:#34D399; font-size:18px;">📋 O.E. (DADOS DIRETOS DA ORDEM DE ENTRADA)</h3>
+            <div>{oe_formatted}</div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+    # ⚡ PRÉ-CARREGAMENTO DOS PRÓXIMOS 3 LOTES EM SEGUNDO PLANO
+    precarregar_proximos_lotes_cat(st.session_state.lote_idx_cat, lista_lotes, mapa_oe, texto_cat, api_keys)
