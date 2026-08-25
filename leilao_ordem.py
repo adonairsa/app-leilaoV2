@@ -63,7 +63,7 @@ def extrair_dados_oe_pdf(file_bytes):
 
                             row_str_upper = " ".join(clean_row).upper()
 
-                            # Identifica e armazena o cabeçalho original da tabela
+                            # Identifica e armazena o cabeçalho exato da tabela
                             if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
                                 headers_atuais = [c if c else f"COLUNA_{i+1}" for i, c in enumerate(clean_row)]
                                 col_map = {}
@@ -177,7 +177,6 @@ def extrair_dados_oe_pdf(file_bytes):
                                 }
                                 table_success = True
 
-                # Contingência para texto simples caso o PDF não possua tabela delimitada
                 if not table_success:
                     texto = page.extract_text(layout=True) or page.extract_text() or ""
                     if texto:
@@ -312,8 +311,9 @@ def run():
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
         .ai-consideracoes-box { background-color: #1E1B4B !important; padding: 20px; border-radius: 15px; margin-top: 5px; border-left: 8px solid #818CF8; }
         .ai-consideracoes-box, .ai-consideracoes-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.6 !important; }
+        .oe-dados-box { background-color: #0F172A !important; padding: 20px; border-radius: 15px; margin-top: 15px; border-left: 8px solid #34D399; }
+        .oe-dados-box, .oe-dados-box * { color: #FFFFFF !important; font-size: 16px !important; line-height: 1.8 !important; }
         .gatilho-card { background: linear-gradient(90deg, #EC4899 0%, #8B5CF6 100%); color: white; padding: 14px; border-radius: 12px; font-size: 18px; margin: 6px 0; font-weight: bold; }
-        .gatilho-ia-card { background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white !important; padding: 16px; border-radius: 14px; font-size: 19px !important; margin: 8px 0; font-weight: bold !important; border-left: 6px solid #34D399; box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
     </style>
     """
     st.markdown(css_code, unsafe_allow_html=True)
@@ -426,5 +426,21 @@ def run():
                 <div>{canta_html}</div>
             </div>
             ''', unsafe_allow_html=True)
+
         elif erro_ia:
             st.error(erro_ia)
+
+        # 📋 CAMPO DEDICADO O.E. (EXIBIÇÃO DIRETA CABEÇALHO + VALOR DO PDF)
+        linha_ctx = dados_lote.get('linha_contextualizada', '')
+        if linha_ctx:
+            itens = linha_ctx.split(' | ')
+            oe_formatted = "<br>".join([f"• <b>{it.split(':', 1)[0]}:</b> {it.split(':', 1)[1]}" if ':' in it else f"• <b>DADO:</b> {it}" for it in itens])
+        else:
+            oe_formatted = dados_lote.get('linha_completa', 'Nenhum dado encontrado na Ordem.')
+
+        st.markdown(f'''
+        <div class="oe-dados-box">
+            <h3 style="margin-top:0; color:#34D399; font-size:18px;">📋 O.E. (DADOS DIRETOS DA ORDEM DE ENTRADA)</h3>
+            <div>{oe_formatted}</div>
+        </div>
+        ''', unsafe_allow_html=True)
