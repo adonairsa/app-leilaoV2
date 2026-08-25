@@ -141,14 +141,14 @@ css_code = """
         font-style: italic;
         border: 2px solid #10B981;
     }
-    .cache-badge {
-        background: #065F46;
-        color: #6EE7B7;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 12px;
+    .status-badge {
+        background: #334155;
+        color: white;
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-size: 13px;
+        margin: 2px;
         display: inline-block;
-        margin-bottom: 5px;
     }
 </style>
 """
@@ -163,18 +163,25 @@ def obter_api_keys():
             ds_keys.append(st.secrets["DEEPSEEK_API_KEY"])
         if "ANTHROPIC_API_KEY" in st.secrets:
             ant_keys.append(st.secrets["ANTHROPIC_API_KEY"])
-    except:
+    except Exception:
         pass
     return ds_keys, ant_keys
 
 # ==================== HELPERS ====================
 def normalizar_lote(valor):
+    """Normaliza número de lote pra comparação: '01', 'Lote 1', 1 -> '1'."""
     if valor is None:
         return ""
     digitos = re.sub(r"\D", "", str(valor))
     return str(int(digitos)) if digitos else ""
 
-# ==================== PROCESSAMENTO ====================
+def hash_bytes(b):
+    if not b:
+        return ""
+    return hashlib.md5(b).hexdigest()
+
+# ==================== PROCESSAMENTO DA O.E. (texto) ====================
+@st.cache_data(ttl=7200, show_spinner=False)
 def processar_pdf_texto(file_bytes):
     paginas = []
     if not file_bytes:
@@ -184,19 +191,22 @@ def processar_pdf_texto(file_bytes):
             for page in pdf.pages:
                 texto = page.extract_text(layout=True) or page.extract_text() or ""
                 paginas.append(texto)
-    except:
+    except Exception:
         pass
     return paginas
 
+# ==================== CATÁLOGO: RENDERIZAÇÃO DE PÁGINAS EM IMAGEM ====================
+@st.cache_data(ttl=7200, show_spinner=False)
 def contar_paginas_pdf(file_bytes):
     if not file_bytes:
         return 0
     try:
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             return len(pdf.pages)
-    except:
+    except Exception:
         return 0
 
+@st.cache_data(ttl=7200, show_spinner=False)
 def obter_imagem_bytes_pagina(file_bytes, num_pagina, resolucao=150, qualidade=85):
     if not file_bytes or num_pagina < 0:
         return None
@@ -207,7 +217,7 @@ def obter_imagem_bytes_pagina(file_bytes, num_pagina, resolucao=150, qualidade=8
                 buffer = BytesIO()
                 img.convert("RGB").save(buffer, format="JPEG", quality=qualidade)
                 return buffer.getvalue()
-    except:
+    except Exception:
         return None
     return None
 
@@ -222,7 +232,8 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
     TEXTO DA O.E.:
     {texto_oe_completo[:6000]}
 
-    Extraia TODOS os lotes.
+    Extraia TODOS os lotes, na ordem em que aparecem. Cada linha geralmente segue o padrão:
+    [posição] [lote] [qtd] [idade] [peso] [categoria] [produto/animal] [vendedor]
 
     Retorne JSON:
     {{
@@ -265,6 +276,7 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
             if response.status_code == 200 and 'choices' in res_json:
                 content = res_json['choices'][0]['message']['content']
                 dados = json.loads(content)
+
                 sequencia = []
                 mapa = {}
                 for lote in dados.get("lotes", []):
@@ -273,31 +285,83 @@ def deepseek_ler_ordem(texto_oe_completo, ds_keys):
                         sequencia.append(lt)
                         mapa[lt] = lote
                 return sequencia, mapa
-        except:
+        except Exception:
             continue
 
     return [], {}
 
-# ==================== CLAUDE INDEXA PÁGINA ====================
+# ==================== CLAUDE INDEXA UMA PÁGINA DO CATÁLOGO ====================
 def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
-    if not img_bytes or not ant_keys:
-        return None
+    """Lê uma página (imagem) do catálogo e retorna os dados estruturados do lote,
+    já em JSON. Usado pra construir o índice completo do catálogo uma única vez.
+    Retorna (dados, erro) — erro é None quando deu tudo certo."""
+    if not img_bytes:
+        return None, "sem imagem da página"
+    if not ant_keys:
+        return None, "ANTHROPIC_API_KEY não configurada"
 
     base64_image = base64.b64encode(img_bytes).decode('utf-8')
     url = "https://api.anthropic.com/v1/messages"
 
-    instrucao = """Esta é uma página de CATÁLOGO de leilão.
-    Se for ficha de lote, extraia: numero_lote, nome_animal, registro, raca, sexo, nascimento, pelagem, vendedor, pai, mae, avo_paterno, avo_paterna, avo_materno, avo_materna, observacoes.
-    Se NÃO for ficha, retorne "numero_lote": null.
-    Retorne APENAS JSON."""
+    instrucao = """Esta é uma página de um CATÁLOGO de leilão. Pode ser a capa, uma página
+    de regras/informações, ou a ficha de UM animal/lote específico.
+
+    Se for a ficha de um lote, extraia:
+    - numero_lote (apenas o número, ex: "01")
+    - nome_animal
+    - registro
+    - raca
+    - sexo
+    - nascimento
+    - pelagem
+    - vendedor
+    - pai
+    - mae
+    - avo_paterno (pai do pai)
+    - avo_paterna (mãe do pai)
+    - avo_materno (pai da mãe)
+    - avo_materna (mãe da mãe)
+    - observacoes (ex: "ventre para livre acasalamento", "somente reprodução",
+      "treinado em 3 tambores", "castrado", previsão de parto, etc — tudo que
+      estiver escrito como observação/status do lote)
+
+    Se a página NÃO for a ficha de um lote (capa, regras, índice), retorne
+    "numero_lote": null e os outros campos vazios.
+
+    Retorne APENAS um JSON válido, sem texto antes ou depois, no formato:
+    {
+      "numero_lote": "01" ou null,
+      "nome_animal": "",
+      "registro": "",
+      "raca": "",
+      "sexo": "",
+      "nascimento": "",
+      "pelagem": "",
+      "vendedor": "",
+      "pai": "",
+      "mae": "",
+      "avo_paterno": "",
+      "avo_paterna": "",
+      "avo_materno": "",
+      "avo_materna": "",
+      "observacoes": ""
+    }
+    """
 
     payload = {
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-5",
         "max_tokens": 1200,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                },
                 {"type": "text", "text": instrucao}
             ]
         }]
@@ -315,26 +379,31 @@ def claude_indexar_pagina_catalogo(img_bytes, ant_keys):
             if response.status_code == 200 and 'content' in res_json:
                 txt_parts = [c['text'] for c in res_json['content'] if c.get('type') == 'text']
                 texto = "\n".join(txt_parts).strip()
+                # remove possíveis blocos ```json
                 texto = re.sub(r"^```json|```$", "", texto.strip(), flags=re.MULTILINE).strip()
                 try:
                     return json.loads(texto)
-                except:
+                except Exception:
                     match = re.search(r"\{.*\}", texto, re.DOTALL)
                     if match:
                         return json.loads(match.group(0))
-        except:
+        except Exception:
             continue
 
     return None
 
-# ==================== ÍNDICE DO CATÁLOGO ====================
-def construir_indice_catalogo(file_bytes_cat, ant_keys, max_paginas=60):
+# ==================== CONSTRÓI ÍNDICE COMPLETO DO CATÁLOGO ====================
+@st.cache_data(ttl=7200, show_spinner=False)
+def construir_indice_catalogo(file_bytes_cat, hash_arquivo, ant_keys, max_paginas=60):
+    """Percorre todas as páginas do catálogo (imagem), lê cada uma com o Claude
+    e monta um dicionário {numero_lote_normalizado: dados}. Roda uma vez por
+    arquivo (cacheado)."""
     indice = {}
     total = min(contar_paginas_pdf(file_bytes_cat), max_paginas)
     if total == 0 or not ant_keys:
         return indice, total
 
-    progresso = st.progress(0, text="Indexando catálogo...")
+    progresso = st.progress(0, text="Indexando catálogo (lendo imagens com IA)...")
     for i in range(total):
         img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, i)
         dados = claude_indexar_pagina_catalogo(img_bytes, ant_keys)
@@ -348,9 +417,12 @@ def construir_indice_catalogo(file_bytes_cat, ant_keys, max_paginas=60):
     return indice, total
 
 def encontrar_no_indice(num_lote_oe, nome_animal_oe, indice):
+    """Tenta casar o lote da O.E. com o índice do catálogo: primeiro por número
+    de lote, depois por similaridade de nome."""
     chave = normalizar_lote(num_lote_oe)
     if chave in indice:
-        return indice[chave]
+        return indice[chave], -1
+
     if nome_animal_oe:
         melhor_match = None
         melhor_score = 0.0
@@ -363,30 +435,48 @@ def encontrar_no_indice(num_lote_oe, nome_animal_oe, indice):
                 melhor_score = score
                 melhor_match = dados
         if melhor_match and melhor_score > 0.55:
-            return melhor_match
-    return None
+            return melhor_match, -1
 
-# ==================== DEEPSEEK CRUZA ====================
+    return None, -1
+
+# ==================== DEEPSEEK CRUZA E GERA APRESENTAÇÃO ====================
 def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
     if not ds_keys:
         return None
 
     prompt = f"""
-    Você é um locutor de leilão. Cruze as informações do LOTE {num_lote}.
+    Você é um locutor de leilão de gado/cavalos experiente. Cruze as informações
+    do LOTE {num_lote} abaixo e gere um material de apoio pra cantar o lote.
 
-    DADOS DA ORDEM:
+    DADOS DA ORDEM DE ENTRADA:
     {json.dumps(dados_ordem, ensure_ascii=False, indent=2)}
 
     DADOS DO CATÁLOGO:
     {json.dumps(dados_catalogo, ensure_ascii=False, indent=2)}
 
     Gere:
-    1. "abertura": frase curta animada
-    2. "encartes": dados importantes
-    3. "gatilhos": 3 gatilhos de pista
-    4. "observacao_destaque": resumo
+    1. "abertura": UMA frase curta (máx. 25 palavras), animada, pra abrir o lote
+       na pista — cite o nome do animal e algo que se destaque (genealogia forte,
+       treino, categoria).
+    2. "encartes": lista com os dados mais importantes pra mostrar em tela
+       (CATEGORIA/RAÇA, PELAGEM, VENDEDOR, e outro campo relevante que existir
+       como PESO, IDADE ou STATUS).
+    3. "gatilhos": 3 gatilhos curtos de pista (frases de impacto, não repetir a
+       abertura).
+    4. "observacao_destaque": se houver algo relevante nas observações do
+       catálogo (reprodução, treino, previsão de parto), resuma em 1 frase.
 
-    Retorne APENAS JSON.
+    Retorne APENAS JSON:
+    {{
+        "abertura": "...",
+        "encartes": [
+            {{"titulo": "CATEGORIA", "valor": "..."}},
+            {{"titulo": "PELAGEM", "valor": "..."}},
+            {{"titulo": "VENDEDOR", "valor": "..."}}
+        ],
+        "gatilhos": ["...", "...", "..."],
+        "observacao_destaque": "..."
+    }}
     """
 
     url = "https://api.deepseek.com/chat/completions"
@@ -407,58 +497,12 @@ def deepseek_cruzar(num_lote, dados_ordem, dados_catalogo, ds_keys):
             res_json = response.json()
             if response.status_code == 200 and 'choices' in res_json:
                 return json.loads(res_json['choices'][0]['message']['content'])
-        except:
+        except Exception:
             continue
 
     return None
 
-# ==================== CACHE EM SESSION STATE ====================
-if 'cache_lotes' not in st.session_state:
-    st.session_state.cache_lotes = {}
-
-def processar_lote_completo(num_lote, dados_lote, indice_catalogo, ds_keys):
-    """Processa um lote completo e salva no cache"""
-    chave = f"{num_lote}"
-    
-    # Se já está em cache, retorna
-    if chave in st.session_state.cache_lotes:
-        return st.session_state.cache_lotes[chave]
-    
-    # Encontra no catálogo
-    dados_catalogo = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
-    pagina = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
-    
-    # Cruza com DeepSeek
-    dados_finais = None
-    if dados_catalogo and ds_keys:
-        dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
-    
-    resultado = {
-        "dados_catalogo": dados_catalogo,
-        "dados_finais": dados_finais,
-        "pagina": pagina
-    }
-    
-    # Salva no cache
-    st.session_state.cache_lotes[chave] = resultado
-    
-    return resultado
-
-def precarregar_proximos_lotes(idx_atual, lista_lotes, mapa_oe, indice_catalogo, ds_keys, qtd=3):
-    """Precarrega os próximos N lotes de forma SIMPLES (sem threads)"""
-    for i in range(1, qtd + 1):
-        idx_proximo = idx_atual + i
-        if idx_proximo < len(lista_lotes):
-            num_lt = lista_lotes[idx_proximo]
-            chave = f"{num_lt}"
-            
-            # Só processa se ainda não está em cache
-            if chave not in st.session_state.cache_lotes:
-                dados_lt = mapa_oe.get(num_lt, {})
-                # Processa silenciosamente (sem spinner)
-                processar_lote_completo(num_lt, dados_lt, indice_catalogo, ds_keys)
-
-# ==================== RENDERIZAR PEDIGREE ====================
+# ==================== CARD DE PEDIGREE ====================
 def renderizar_pedigree(dados_catalogo):
     if not dados_catalogo:
         return
@@ -473,10 +517,14 @@ def renderizar_pedigree(dados_catalogo):
         return
 
     html = '<div class="pedigree-card"><table>'
-    html += f'<tr><td><strong>PAI</strong></td><td>{pai or "-"}</td><td><strong>AVÔ PATERNO</strong></td><td>{ap or "-"}</td></tr>'
-    html += f'<tr><td></td><td></td><td><strong>AVÓ PATERNA</strong></td><td>{apm or "-"}</td></tr>'
-    html += f'<tr><td><strong>MÃE</strong></td><td>{mae or "-"}</td><td><strong>AVÔ MATERNO</strong></td><td>{am or "-"}</td></tr>'
-    html += f'<tr><td></td><td></td><td><strong>AVÓ MATERNA</strong></td><td>{amm or "-"}</td></tr>'
+    html += f'<tr><td><strong>PAI</strong></td><td>{pai or "-"}</td>' \
+            f'<td><strong>AVÔ PATERNO</strong></td><td>{ap or "-"}</td></tr>'
+    html += f'<tr><td></td><td></td>' \
+            f'<td><strong>AVÓ PATERNA</strong></td><td>{apm or "-"}</td></tr>'
+    html += f'<tr><td><strong>MÃE</strong></td><td>{mae or "-"}</td>' \
+            f'<td><strong>AVÔ MATERNO</strong></td><td>{am or "-"}</td></tr>'
+    html += f'<tr><td></td><td></td>' \
+            f'<td><strong>AVÓ MATERNA</strong></td><td>{amm or "-"}</td></tr>'
     html += '</table></div>'
     st.markdown(html, unsafe_allow_html=True)
 
@@ -492,11 +540,8 @@ def run():
         st.markdown("---")
         modo_ordenacao = st.radio("Ordem:", ["ORDEM DE ENTRADA", "ORDEM NUMÉRICA"], index=0)
         max_paginas_catalogo = st.number_input(
-            "Máx. de páginas do catálogo", min_value=1, max_value=300, value=60
+            "Máx. de páginas do catálogo pra indexar", min_value=1, max_value=300, value=60
         )
-        
-        st.markdown("---")
-        qtd_precarregar = st.slider("Precarregar próximos lotes:", min_value=0, max_value=5, value=3)
 
     file_bytes_oe = file_oe.getvalue() if file_oe else None
     file_bytes_cat = file_cat.getvalue() if file_cat else None
@@ -515,13 +560,15 @@ def run():
         st.warning("Carregue a O.E. e configure o DeepSeek!")
         st.stop()
 
-    # Índice do catálogo
+    # Índice completo do catálogo (imagem -> JSON por lote), construído uma vez
     indice_catalogo = {}
     total_paginas_cat = 0
     if file_bytes_cat and ant_keys:
         indice_catalogo, total_paginas_cat = construir_indice_catalogo(
-            file_bytes_cat, ant_keys, max_paginas_catalogo
+            file_bytes_cat, hash_bytes(file_bytes_cat), ant_keys, max_paginas_catalogo
         )
+    elif file_bytes_cat and not ant_keys:
+        st.warning("Catálogo carregado, mas falta a chave da Anthropic (ANTHROPIC_API_KEY) pra indexar as páginas.")
 
     if modo_ordenacao == "ORDEM NUMÉRICA":
         lista_lotes = sorted(sequencia_oe, key=lambda x: int(re.sub(r"\D", "", x) or 0))
@@ -552,52 +599,55 @@ def run():
     num_lote = lista_lotes[st.session_state.lote_idx]
     dados_lote = mapa_oe.get(num_lote, {})
 
-    # Processa lote atual (usa cache se existir)
-    resultado = processar_lote_completo(num_lote, dados_lote, indice_catalogo, ds_keys)
-    dados_catalogo = resultado.get("dados_catalogo")
-    dados_finais = resultado.get("dados_finais")
-    pagina_detectada = resultado.get("pagina", -1)
-    
-    # Mostra se veio do cache
-    if f"{num_lote}" in st.session_state.cache_lotes and st.session_state.cache_lotes[f"{num_lote}"].get("_exibido"):
-        st.markdown('<span class="cache-badge">⚡ CACHE</span>', unsafe_allow_html=True)
-    
-    # Marca como exibido
-    st.session_state.cache_lotes[f"{num_lote}"] = {
-        **resultado,
-        "_exibido": True
-    }
+    # Casa o lote da O.E. com o índice do catálogo
+    dados_catalogo, _ = encontrar_no_indice(num_lote, dados_lote.get("nome_animal", ""), indice_catalogo)
+    pagina_detectada = dados_catalogo.get("_pagina", -1) if dados_catalogo else -1
 
-    # PRECARREGA OS PRÓXIMOS LOTES (SILENCIOSO)
-    if qtd_precarregar > 0:
-        precarregar_proximos_lotes(
-            st.session_state.lote_idx, lista_lotes, mapa_oe, indice_catalogo, ds_keys, qtd_precarregar
+    if file_bytes_cat and indice_catalogo and pagina_detectada < 0:
+        st.warning(f"⚠️ Lote {num_lote} não encontrado automaticamente no catálogo. Escolha a página manualmente:")
+        pagina_manual = st.number_input(
+            "Página do catálogo:", min_value=1, max_value=max(1, total_paginas_cat),
+            value=1, key=f"pag_{num_lote}"
         )
+        pagina_detectada = pagina_manual - 1
+
+    dados_finais = None
+    if dados_catalogo and ds_keys:
+        with st.spinner("🔄 Cruzando informações..."):
+            dados_finais = deepseek_cruzar(num_lote, dados_lote, dados_catalogo, ds_keys)
 
     # ==================== LAYOUT ====================
     col_esquerda, col_direita = st.columns([1, 1])
 
+    # ---------- COLUNA ESQUERDA: catálogo + IA ----------
     with col_esquerda:
         if dados_finais and dados_finais.get("abertura"):
-            st.markdown(f'<div class="abertura-box">🎙️ "{dados_finais["abertura"]}"</div>', unsafe_allow_html=True)
-        
+            st.markdown(
+                f'<div class="abertura-box">🎙️ "{dados_finais["abertura"]}"</div>',
+                unsafe_allow_html=True
+            )
         if dados_finais and dados_finais.get("observacao_destaque"):
             st.markdown(
-                f'<div class="ai-consideracoes-box"><h3 style="margin-top:0; color:#818CF8;">🤖 OBSERVAÇÃO</h3>'
+                f'<div class="ai-consideracoes-box"><h3 style="margin-top:0; color:#818CF8; font-size:18px;">🤖 OBSERVAÇÃO</h3>'
                 f'<div>{dados_finais["observacao_destaque"]}</div></div>',
                 unsafe_allow_html=True
             )
 
-        # CATÁLOGO SEMPRE VISÍVEL
         if file_bytes_cat and pagina_detectada >= 0:
             st.markdown(f'<div class="catalogo-header">📖 CATÁLOGO - PÁGINA {pagina_detectada + 1}</div>', unsafe_allow_html=True)
-            img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada)
+            img_bytes = obter_imagem_bytes_pagina(file_bytes_cat, pagina_detectada, resolucao=150, qualidade=85)
             if img_bytes:
                 st.image(img_bytes, use_container_width=True)
 
+        if dados_catalogo:
+            with st.expander("📖 Dados extraídos do catálogo (bruto)"):
+                st.json(dados_catalogo)
+
+    # ---------- COLUNA DIREITA: lote em cards ----------
     with col_direita:
         st.markdown(
-            f'<div class="lote-destaque">LOTE {num_lote}<br><span style="font-size: 24px;">{dados_lote.get("posicao", "")}</span></div>',
+            f'<div class="lote-destaque">LOTE {num_lote}<br>'
+            f'<span style="font-size: 24px;">{dados_lote.get("posicao", "")}</span></div>',
             unsafe_allow_html=True
         )
 
@@ -611,6 +661,7 @@ def run():
         if nome_exibir:
             st.markdown(f'<div class="nome-animal-box">🐴 {nome_exibir}</div>', unsafe_allow_html=True)
 
+        # ---- Encartes (cards) ----
         st.markdown("### 📋 INFORMAÇÕES DO LOTE")
 
         if dados_finais and dados_finais.get("encartes"):
@@ -619,34 +670,73 @@ def run():
             for idx, enc in enumerate(encartes_validos):
                 col = cols[idx % len(cols)]
                 with col:
-                    st.markdown(f'<div class="animal-info"><strong>{enc["titulo"]}:</strong><br>{enc["valor"]}</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="animal-info"><strong>{enc["titulo"]}:</strong><br>{enc["valor"]}</div>',
+                        unsafe_allow_html=True
+                    )
         elif dados_catalogo:
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.markdown(f'<div class="animal-info"><strong>RAÇA:</strong><br>{dados_catalogo.get("raca", "-")}<br><br><strong>SEXO:</strong><br>{dados_catalogo.get("sexo", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>RAÇA:</strong><br>{dados_catalogo.get("raca", "-")}<br><br>'
+                    f'<strong>SEXO:</strong><br>{dados_catalogo.get("sexo", "-")}</div>',
+                    unsafe_allow_html=True
+                )
             with col2:
-                st.markdown(f'<div class="animal-info"><strong>PELAGEM:</strong><br>{dados_catalogo.get("pelagem", "-")}<br><br><strong>NASCIMENTO:</strong><br>{dados_catalogo.get("nascimento", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>PELAGEM:</strong><br>{dados_catalogo.get("pelagem", "-")}<br><br>'
+                    f'<strong>NASCIMENTO:</strong><br>{dados_catalogo.get("nascimento", "-")}</div>',
+                    unsafe_allow_html=True
+                )
             with col3:
-                st.markdown(f'<div class="animal-info"><strong>REGISTRO:</strong><br>{dados_catalogo.get("registro", "-")}<br><br><strong>VENDEDOR:</strong><br>{dados_catalogo.get("vendedor", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>REGISTRO:</strong><br>{dados_catalogo.get("registro", "-")}<br><br>'
+                    f'<strong>VENDEDOR:</strong><br>{dados_catalogo.get("vendedor", "-")}</div>',
+                    unsafe_allow_html=True
+                )
         else:
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.markdown(f'<div class="animal-info"><strong>CATEGORIA:</strong><br>{dados_lote.get("categoria", "-")}<br><br><strong>RAÇA:</strong><br>{dados_lote.get("raca", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>CATEGORIA:</strong><br>{dados_lote.get("categoria", "-")}<br><br>'
+                    f'<strong>RAÇA:</strong><br>{dados_lote.get("raca", "-")}</div>',
+                    unsafe_allow_html=True
+                )
             with col2:
-                st.markdown(f'<div class="animal-info"><strong>PESO:</strong><br>{dados_lote.get("peso", "-")}<br><br><strong>IDADE:</strong><br>{dados_lote.get("idade", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>PESO:</strong><br>{dados_lote.get("peso", "-")}<br><br>'
+                    f'<strong>IDADE:</strong><br>{dados_lote.get("idade", "-")}</div>',
+                    unsafe_allow_html=True
+                )
             with col3:
-                st.markdown(f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd", "-")}<br><br><strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor", "-")}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="animal-info"><strong>QTD:</strong><br>{dados_lote.get("qtd", "-")}<br><br>'
+                    f'<strong>VENDEDOR:</strong><br>{dados_lote.get("vendedor", "-")}</div>',
+                    unsafe_allow_html=True
+                )
 
+        # ---- Pedigree ----
         if dados_catalogo:
             st.markdown("### 🧬 GENEALOGIA")
             renderizar_pedigree(dados_catalogo)
+            if dados_catalogo.get("observacoes"):
+                st.markdown(
+                    f'<span class="status-badge">📌 {dados_catalogo["observacoes"]}</span>',
+                    unsafe_allow_html=True
+                )
 
+        # ---- Gatilhos de pista ----
         st.markdown("### 🎤 GATILHOS DE PISTA")
         if dados_finais and dados_finais.get("gatilhos"):
             for g in dados_finais["gatilhos"]:
                 st.markdown(f'<div class="gatilho-card">🔥 {g}</div>', unsafe_allow_html=True)
         else:
-            for g in ["ANIMAL SELECIONADO!", "PROCEDÊNCIA GARANTIDA!", "OPORTUNIDADE ÚNICA!"]:
+            gatilhos_genericos = [
+                "ANIMAL SELECIONADO: Qualidade superior!",
+                "PROCEDÊNCIA GARANTIDA: Origem comprovada!",
+                "OPORTUNIDADE ÚNICA: Preço imperdível!"
+            ]
+            for g in gatilhos_genericos:
                 st.markdown(f'<div class="gatilho-card">🔥 {g}</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
