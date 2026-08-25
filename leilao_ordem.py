@@ -9,31 +9,26 @@ import concurrent.futures
 from io import BytesIO
 
 def obter_api_keys():
-    chaves_brutas = []
+    chaves_deepseek = []
     try:
-        for secret_name in ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"]:
-            if secret_name in st.secrets:
-                val = st.secrets[secret_name]
-                if isinstance(val, (list, tuple)):
-                    chaves_brutas.extend(val)
-                elif isinstance(val, str):
-                    chaves_brutas.extend(val.split(","))
-    except Exception:
-        pass
+        if hasattr(st, "secrets"):
+            for secret_name in ["DEEPSEEK_API_KEY", "DEEPSEEK_API_KEYS"]:
+                if secret_name in st.secrets:
+                    val = st.secrets[secret_name]
+                    if isinstance(val, (list, tuple)):
+                        chaves_deepseek.extend(val)
+                    elif isinstance(val, str):
+                        chaves_deepseek.extend(val.split(","))
+    except Exception as e:
+        st.sidebar.error(f"⚠️ Erro ao ler Secrets (Sintaxe TOML?): {str(e)}")
 
-    if not chaves_brutas:
-        env_val = os.environ.get("DEEPSEEK_API_KEYS") or os.environ.get("DEEPSEEK_API_KEY") or ""
+    if not chaves_deepseek:
+        env_val = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEYS") or ""
         if env_val:
-            chaves_brutas.extend(env_val.split(","))
+            chaves_deepseek.extend(env_val.split(","))
 
-    chaves_limpas = []
-    for item in chaves_brutas:
-        s = str(item).strip()
-        s_clean = re.sub(r"[\[\]'\" \n\r\t]", "", s)
-        if s_clean and s_clean not in chaves_limpas:
-            chaves_limpas.append(s_clean)
-
-    return chaves_limpas
+    clean_ds = [str(x).strip().strip("'\"") for x in chaves_deepseek if str(x).strip()]
+    return clean_ds
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def extrair_dados_oe_pdf(file_bytes):
@@ -221,7 +216,7 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é identificar com precisão CIRÚRGICA a ESPÉCIE DO ANIMAL e usar os termos corretos de leilão.
+    Sua missão é identificar com precisão CIRÚRGICA a ESPÉCIE DO ANIMAL e usar os termos corretos do leilão.
 
     REGRAS DE CLASSIFICAÇÃO DE ESPÉCIE E LINGUAGEM:
     1. EQUINOS (Cavalo, Égua, Potro, Quarto de Milha, Crioulo, Mangalarga, etc.):
@@ -231,7 +226,7 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
     2. BOVINOS DE CORTE (Nelore, Angus, Brahman, Senepol, Macho, Fêmea de Corte):
        - Defina "especie_emoji": "🐂"
        - Use termos como: 'Touro', 'Matriz', 'Novilha', 'Carcaça', 'Raça Zebuína', 'Ganho de Peso', 'iABCZ/IQG'.
-3. BOVINOS DE LEITE (Gir Leiteiro, Girolando, Holandês):
+    3. BOVINOS DE LEITE (Gir Leiteiro, Girolando, Holandês):
        - Defina "especie_emoji": "🐄"
        - Use termos como: 'Produção Leiteira', 'Lactação', 'Úbere', 'Matriz Leiteira'.
     4. MUARES / ASININOS (Mula, Burro, Jumento):
@@ -332,7 +327,7 @@ def run():
         .ordem-indicador { background: #16A34A; color: white; padding: 12px; border-radius: 10px; text-align: center; font-weight: bold; margin: 8px 0; font-size: 20px; }
         .banner-parida { background: linear-gradient(135deg, #7E22CE 0%, #581C87 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #A855F7; }
         .banner-prenhez { background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #EF4444; }
-        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #F59E0B; }
+        .banner-inseminacao { background: linear-gradient(135deg, #D97706 0%, #92400E 100%); color: #FFFFFF !important; padding: 18px; border-radius: 14px; margin-bottom: 12px; font-size: 22px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .banner-venda { background: linear-gradient(135deg, #EAB308 0%, #CA8A04 100%); color: #000000 !important; padding: 16px; border-radius: 14px; margin-bottom: 12px; font-size: 24px !important; font-weight: 900 !important; text-align: center; border: 3px solid #FACC15; }
         .animal-info { background: #1E293B; color: white; padding: 15px; border-radius: 12px; margin: 5px 0; border: 1px solid #334155; min-height: 90px; }
         .nome-animal-box { background: #0284C7; color: white; padding: 14px; border-radius: 12px; margin-bottom: 12px; font-size: 22px; font-weight: bold; text-align: center; }
