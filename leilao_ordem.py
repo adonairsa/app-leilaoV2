@@ -50,7 +50,9 @@ def extrair_dados_oe_pdf(file_bytes):
 
                 if tables:
                     for table in tables:
+                        headers_atuais = []
                         col_map = {}
+                        
                         for row in table:
                             if not row:
                                 continue
@@ -61,8 +63,9 @@ def extrair_dados_oe_pdf(file_bytes):
 
                             row_str_upper = " ".join(clean_row).upper()
 
-                            # Identifica e mapeia colunas pelo cabeçalho
+                            # Identifica e armazena o cabeçalho original da tabela
                             if any(h in row_str_upper for h in ['LT', 'LOTE', 'CATEGORIA', 'PRODUTO', 'ANIMAL', 'VENDEDOR']):
+                                headers_atuais = [c if c else f"COLUNA_{i+1}" for i, c in enumerate(clean_row)]
                                 col_map = {}
                                 for idx, cell in enumerate(clean_row):
                                     c_u = cell.upper()
@@ -106,6 +109,14 @@ def extrair_dados_oe_pdf(file_bytes):
                                 raw_oe = clean_row[oe_col] if oe_col < len(clean_row) else ""
                                 clean_oe = re.sub(r"\D", "", raw_oe)
                                 posicao_fmt = f"{int(clean_oe)}º A ENTRAR" if clean_oe else (raw_oe if raw_oe else f"{len(sequencia)+1}º A ENTRAR")
+
+                                # MONTA A LINHA CONTEXTUALIZADA (CABEÇALHO + DADO)
+                                pares_rotulados = []
+                                for idx, val in enumerate(clean_row):
+                                    if val:
+                                        nome_col = headers_atuais[idx] if idx < len(headers_atuais) and headers_atuais[idx] else f"CAMPO_{idx+1}"
+                                        pares_rotulados.append(f"{nome_col}: {val}")
+                                linha_contextualizada = " | ".join(pares_rotulados)
 
                                 def get_val(key):
                                     return clean_row[col_map[key]] if key in col_map and col_map[key] < len(clean_row) else ""
@@ -161,11 +172,12 @@ def extrair_dados_oe_pdf(file_bytes):
                                     "vendedor": vendedor,
                                     "info_reproducao": info_repro,
                                     "tipo_reproducao": tipo_repro,
+                                    "linha_contextualizada": linha_contextualizada,
                                     "linha_completa": " | ".join([c for c in clean_row if c])
                                 }
                                 table_success = True
 
-                # Contingência para texto simples caso não seja tabela PDF delimitada
+                # Contingência para texto simples caso o PDF não possua tabela delimitada
                 if not table_success:
                     texto = page.extract_text(layout=True) or page.extract_text() or ""
                     if texto:
@@ -196,7 +208,9 @@ def extrair_dados_oe_pdf(file_bytes):
                                         "vendedor": restante[-1] if len(restante)>4 else "",
                                         "info_reproducao": "", "tipo_reproducao": "",
                                         "nome_animal": " ".join(restante[4:-1]) if len(restante)>5 else "",
-                                        "porcentagem_venda": "", "linha_completa": linha_limpa
+                                        "porcentagem_venda": "", 
+                                        "linha_contextualizada": f"LINHA COMPLETA: {linha_limpa}",
+                                        "linha_completa": linha_limpa
                                     }
     except Exception as e:
         st.error(f"Erro ao extrair PDF: {str(e)}")
@@ -209,30 +223,21 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         return None, "⚠️ Nenhuma chave DEEPSEEK_API_KEY encontrada nos Secrets do Streamlit."
 
     prompt_system = """Você é um Leiloeiro Rural e Zootecnista de Elite no Brasil.
-    Sua missão é ler as informações de um lote de leilão e organizar a apresentação visual para a tela do leiloeiro na pista."""
+    Sua missão é ler a associação exata entre o Cabeçalho da Tabela do PDF e os dados do Lote para organizar os encartes visuais da tela e a canta da pista."""
 
     prompt_user = f"""
-    Analise os dados do LOTE {num_lote}:
-    - Posição de Entrada: {dados_lote.get('posicao', 'N/A')}
-    - Número do Lote: {num_lote}
-    - Categoria: {dados_lote.get('categoria', '')}
-    - Pelagem: {dados_lote.get('pelagem', '')}
-    - Produto / Animal: {dados_lote.get('nome_animal') or dados_lote.get('produto', 'N/A')}
-    - Oferta: {dados_lote.get('porcentagem_venda', '100%')}
-    - Qtd: {dados_lote.get('qtd', '')}
-    - Peso: {dados_lote.get('peso', '')}
-    - Idade: {dados_lote.get('idade', '')}
-    - Status Reprodutivo: {dados_lote.get('info_reproducao', '')}
-    - Vendedor: {dados_lote.get('vendedor', '')}
-    - Linha Bruta PDF: {dados_lote.get('linha_completa', '')}
+    Analise os dados rotulados do LOTE {num_lote}:
+
+    📍 LINHA DA ORDEM COM CABEÇALHO ASSOCIADO (CHAVE: VALOR):
+    {dados_lote.get('linha_contextualizada', dados_lote.get('linha_completa', ''))}
 
     INSTRUÇÕES CRÍTICAS DE LEILOEIRO:
-    1. Crie uma lista de "ENCARTES" (cartões de informação) prioritários para aparecer na tela.
-    2. Coloque APENAS o que existir com valor preenchido na Ordem e que agregue valor ao lote (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDOR, QTD).
-    3. NUNCA invente peso ou idade se o campo estiver vazio ou não existir na Ordem.
-    4. Crie uma canta de venda agressiva ressaltando o nome e as qualidades do lote.
+    1. Crie a lista de "ENCARTES" (cartões visuais da tela) associando exatamente o nome da coluna no cabeçalho com o dado do lote.
+    2. Coloque APENAS encartes que tenham conteúdo útil (ex: CATEGORIA, PELAGEM, PESO, IDADE, VENDEDORES, QTD).
+    3. Se não houver Peso ou Idade no cabeçalho/linha, NÃO crie os encartes de Peso ou Idade.
+    4. Crie uma canta de venda agressiva em 1 frase exaltando o produto e o vendedor.
 
-    Retorne EXATAMENTE um JSON válido com a seguinte estrutura:
+    Retorne EXATAMENTE um JSON válido neste formato:
     {{
         "posicao_entrada": "{dados_lote.get('posicao')}",
         "nome_animal": "{dados_lote.get('nome_animal') or dados_lote.get('produto', '')}",
@@ -240,14 +245,12 @@ def analisar_lote_leiloeiro_deepseek(num_lote, dados_lote, api_keys):
         "status_reproducao": "{dados_lote.get('info_reproducao', '')}",
         "tipo_reproducao": "{dados_lote.get('tipo_reproducao', '')}",
         "encartes": [
-            {{"titulo": "CATEGORIA", "valor": "..."}},
-            {{"titulo": "PELAGEM", "valor": "..."}},
-            {{"titulo": "VENDEDOR", "valor": "..."}}
+            {{"titulo": "NOME_DO_CABEÇALHO", "valor": "VALOR_DA_COLUNA"}}
         ],
         "apresentacao": "Frase agressiva de canta...",
-        "genetica_pai": "Informação do pai/linhagem se houver na linha bruta",
-        "genetica_mae": "Informação da mãe/linhagem se houver na linha bruta",
-        "reproducao_detalhe": "Detalhes de prenhez/inseminação se houver",
+        "genetica_pai": "Linhagem paterna se houver no texto",
+        "genetica_mae": "Linhagem materna se houver no texto",
+        "reproducao_detalhe": "Detalhes de prenhez se houver",
         "gatilhos": [
             "Gatilho curto 1",
             "Gatilho curto 2",
